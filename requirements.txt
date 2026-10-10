@@ -1,0 +1,7 @@
+# Telepítés: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# Indítás:   .venv/bin/streamlit run app.py
+# Kipróbálva: Python 3.9, streamlit 1.50, pandas 2.3, numpy 2.0, requests 2.32.
+streamlit>=1.40
+pandas>=2.0
+numpy>=1.24
+requests>=2.31

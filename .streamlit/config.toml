@@ -1,0 +1,10 @@
+# Sötét, zöld–sötétszürke téma. A táblázatok színeit csak innen lehet állítani;
+# a kártyák és gombok finomhangolása az app.py STYLE blokkjában van.
+[theme]
+base = "dark"
+primaryColor = "#1fd17f"
+backgroundColor = "#101513"
+secondaryBackgroundColor = "#18201c"
+textColor = "#e9f0ec"
+borderColor = "#2b3832"
+baseRadius = "0.75rem"

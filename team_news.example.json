@@ -1,0 +1,49 @@
+{
+  "_megjegyzes": "PÉLDA: a játékosnevek és a hiányzások kitaláltak, nem valós adatok. A csapatneveknek a football-data.co.uk neveivel kell egyezniük.",
+  "keyPlayers": {
+    "Man City": ["Példa Irányító", "Példa Góllövő"]
+  },
+  "matches": [
+    {
+      "home": "Arsenal",
+      "away": "Leeds",
+      "lineups": {
+        "confirmed": false,
+        "home": {
+          "missingPlayers": [
+            {"player": {"name": "Példa Csatár", "position": "F"}, "type": "missing", "reason": "injury", "key": true},
+            {"player": {"name": "Példa Szélső", "position": "F"}, "type": "doubtful", "reason": "injury", "key": true}
+          ]
+        },
+        "away": {
+          "missingPlayers": [
+            {"player": {"name": "Példa Hátvéd", "position": "D"}, "type": "missing", "reason": "suspension", "key": true},
+            {"player": {"name": "Példa Kapus", "position": "G"}, "type": "missing", "reason": "injury", "key": true},
+            {"player": {"name": "Példa Csere", "position": "M"}, "type": "missing", "reason": "injury"}
+          ]
+        }
+      }
+    },
+    {
+      "home": "Liverpool",
+      "away": "Man City",
+      "referee": {"name": "Példa Bíró", "yellowCards": 260, "games": 50},
+      "lineups": {
+        "confirmed": true,
+        "home": {
+          "formation": "4-3-3",
+          "players": [],
+          "missingPlayers": []
+        },
+        "away": {
+          "formation": "4-2-3-1",
+          "players": [
+            {"player": {"name": "Példa Góllövő", "position": "F"}, "substitute": false},
+            {"player": {"name": "Példa Irányító", "position": "M"}, "substitute": true}
+          ],
+          "missingPlayers": []
+        }
+      }
+    }
+  ]
+}

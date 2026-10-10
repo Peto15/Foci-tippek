@@ -1,0 +1,6 @@
+# titkos kulcsok és helyi adatok
+.env
+.streamlit/secrets.toml
+odds_log.json
+.venv/
+__pycache__/
