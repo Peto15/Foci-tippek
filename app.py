@@ -4,6 +4,7 @@ Indítás:
     streamlit run app.py
 """
 
+import importlib
 import json
 import math
 import re
@@ -17,6 +18,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import main as model
+
+# Frissítés után a felhőben a main.py régi változata a memóriában ragadhat, miközben az app.py már új.
+# Ha a fájl megváltozott a betöltése óta, újratöltjük, és a régi változattal letöltött adatokat eldobjuk.
+_model_mtime = Path(model.__file__).stat().st_mtime
+if getattr(model, "_loaded_mtime", _model_mtime) != _model_mtime:
+    model = importlib.reload(model)
+    st.cache_data.clear()
+model._loaded_mtime = _model_mtime
 
 POSITIONS = {"Kapus": "G", "Védő": "D", "Középpályás": "M", "Támadó": "F"}
 REASONS = ["sérült", "eltiltott", "egyéb"]
