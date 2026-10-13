@@ -102,7 +102,6 @@ STYLE = """
 }
 .hero-title { font-size: 1.9rem; font-weight: 800; line-height: 1.2; color: var(--text); }
 .hero-title span { color: var(--green); }
-.hero-sub { color: var(--muted); font-size: .9rem; margin-top: .35rem; }
 
 /* Fülek: pirula alakú gombsor */
 .stTabs [data-baseweb="tab-list"] {
@@ -201,8 +200,9 @@ STYLE = """
 </style>
 """
 
-st.set_page_config(page_title="Foci tippek", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="PetoRadar", page_icon="⚽", layout="wide")
 st.html(STYLE)
+st.html('<div class="hero"><div class="hero-title">⚽ Peto<span>Radar</span></div></div>')
 
 
 DOWNLOAD_ERRORS = (requests.RequestException, KeyError, ValueError, model.OddsApiError)
@@ -550,13 +550,10 @@ teams = sorted(set(fixtures["home"]) | set(fixtures["away"]))
 # --- Fejléc -------------------------------------------------------------------
 
 round_text = f"{selected_date:%Y.%m.%d.} ({model.WEEKDAYS[selected_date.weekday()]})"
-st.html(
-    f'<div class="hero"><div class="hero-title">⚽ {escape(model.LEAGUES[league])} <span>tippek</span></div>'
-    f'<div class="hero-sub">{season_start}/{(season_start + 1) % 100:02d}, {escape(round_text)} · '
+st.caption(
+    f"{season_start}/{(season_start + 1) % 100:02d}, {round_text} · "
     f"{len(fixtures)} meccs · a becslés {len(season_history)} idei és {len(previous)} korábbi meccsre épül"
-    + (", valamint a csapatok hazai bajnoki teljesítményére, a bajnokságok erőssége szerint" if league in model.EUROPEAN_CUPS else "")
-    + ""
-    "</div></div>"
+    + (", valamint a csapatok hazai bajnoki teljesítményére, a bajnokságok erőssége szerint" if is_cup else "")
 )
 
 # --- Élő és befejezett meccsek ------------------------------------------------
