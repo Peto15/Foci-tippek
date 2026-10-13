@@ -1139,14 +1139,17 @@ def fetch_schedule(league: str, teams: list, months: int = SCHEDULE_MONTHS) -> p
     """
     now = pd.Timestamp.now(tz="UTC")
     first = now - pd.Timedelta(days=SCHEDULE_BACK_DAYS)
-    events = {}
-    for month in pd.period_range(first.tz_localize(None).to_period("M"), now.tz_localize(None).to_period("M") + months - 1):
+
+    def one(month) -> list:
         response = requests.get(
             ESPN_URL.format(league=ESPN_LEAGUES[league]), params={"dates": month.strftime("%Y%m"), "limit": 300}, timeout=20
         )
         response.raise_for_status()
-        for event in response.json().get("events", []):
-            events[event["id"]] = event
+        return response.json().get("events", [])
+
+    wanted = pd.period_range(first.tz_localize(None).to_period("M"), now.tz_localize(None).to_period("M") + months - 1)
+    with ThreadPoolExecutor(max_workers=6) as pool:  # a hónapok egyszerre töltődnek le; hiba esetén az egész lekérés hibás
+        events = {event["id"]: event for month in pool.map(one, wanted) for event in month}
 
     listed, names = [], {}
     for event in events.values():
@@ -1339,16 +1342,18 @@ def fetch_upcoming(league: str, teams: list) -> pd.DataFrame:
     A játékvezető a football-data.co.uk listájából jön, amely csak a következő napokat
     tartalmazza; ha a hosszabb menetrend nem érhető el, ez a rövid lista marad.
     """
-    try:
-        near = fetch_fixtures(league)
-    except (requests.RequestException, KeyError, ValueError):
-        near = None
-    try:
-        schedule = fetch_schedule(league, teams)
-    except (requests.RequestException, KeyError, ValueError):
-        if near is None:
-            raise
-        return near
+    with ThreadPoolExecutor(max_workers=2) as pool:  # a két forrás egyszerre töltődik le
+        short, long = pool.submit(fetch_fixtures, league), pool.submit(fetch_schedule, league, teams)
+        try:
+            near = short.result()
+        except (requests.RequestException, KeyError, ValueError):
+            near = None
+        try:
+            schedule = long.result()
+        except (requests.RequestException, KeyError, ValueError):
+            if near is None:
+                raise
+            return near
     if near is not None and not near.empty and not schedule.empty:
         referees = near.set_index(["home", "away"])["referee"]
         referees = referees[~referees.index.duplicated()]

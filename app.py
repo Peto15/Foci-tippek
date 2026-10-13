@@ -8,7 +8,9 @@ import importlib
 import json
 import math
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from html import escape, unescape
 from pathlib import Path
 
@@ -16,6 +18,11 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:  # a párhuzamos letöltések szálai ezzel kapják meg az oldal futási környezetét
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+except ImportError:
+    add_script_run_ctx = get_script_run_ctx = None
 
 import main as model
 
@@ -198,25 +205,94 @@ st.set_page_config(page_title="Foci tippek", page_icon="⚽", layout="wide")
 st.html(STYLE)
 
 
-@st.cache_data(ttl=3600, show_spinner="Meccsek letöltése…")
-def load_season(league: str, start_year: int) -> pd.DataFrame:
+DOWNLOAD_ERRORS = (requests.RequestException, KeyError, ValueError, model.OddsApiError)
+CLOSED_TTL = 86400  # a lezárt szezonok adatai már nem változnak, elég naponta egyszer letölteni
+
+
+def together(calls: list) -> list:
+    """A megadott letöltések egyszerre, külön szálakon; az eredmények a hívások sorrendjében.
+
+    Amelyik letöltés nem sikerül, annak None az eredménye: a gyorsítótárba nem kerül be, így
+    a későbbi rendes hívás újra megpróbálja, és ott derül ki a hiba.
+    """
+    context = get_script_run_ctx() if get_script_run_ctx else None
+
+    def run(call):
+        if context is not None:
+            add_script_run_ctx(threading.current_thread(), context)
+        try:
+            return call()
+        except DOWNLOAD_ERRORS:
+            return None
+
+    if len(calls) < 2:
+        return [run(call) for call in calls]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(run, calls))
+
+
+def in_background(call) -> None:
+    """Egy lassú letöltés elindítása a háttérben, hogy a gyorsítótárba kerüljön, mire az oldal odaér.
+
+    Ha a rendes hívás előbb érkezik, megvárja a folyamatban lévő letöltést, nem indít másikat.
+    """
+    context = get_script_run_ctx() if get_script_run_ctx else None
+
+    def run():
+        try:
+            call()
+        except DOWNLOAD_ERRORS:
+            pass
+
+    thread = threading.Thread(target=run, daemon=True)
+    if context is not None:
+        add_script_run_ctx(thread, context)
+    thread.start()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_current_season(league: str, start_year: int) -> pd.DataFrame:
     return model.fetch_matches(league, model.season_code(start_year))
 
 
-@st.cache_data(ttl=21600, show_spinner="Játékstílus-adatok letöltése…")
-def load_possession(league: str, start_year: int, teams: tuple) -> pd.DataFrame:
+@st.cache_data(ttl=CLOSED_TTL, show_spinner=False)
+def load_closed_season(league: str, start_year: int) -> pd.DataFrame:
+    return model.fetch_matches(league, model.season_code(start_year))
+
+
+def load_season(league: str, start_year: int) -> pd.DataFrame:
+    """Egy szezon lejátszott meccsei; a lezárt szezonok tovább maradnak a gyorsítótárban."""
+    closed = start_year < model.current_season_start()
+    return load_closed_season(league, start_year) if closed else load_current_season(league, start_year)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_current_possession(league: str, start_year: int, teams: tuple) -> pd.DataFrame:
     return model.fetch_possession(league, start_year, list(teams))
+
+
+@st.cache_data(ttl=CLOSED_TTL, show_spinner=False)
+def load_closed_possession(league: str, start_year: int, teams: tuple) -> pd.DataFrame:
+    return model.fetch_possession(league, start_year, list(teams))
+
+
+def load_possession(league: str, start_year: int, teams: tuple) -> pd.DataFrame:
+    closed = start_year < model.current_season_start()
+    return (load_closed_possession if closed else load_current_possession)(league, start_year, teams)
+
+
+def season_teams(matches: pd.DataFrame) -> tuple:
+    return tuple(sorted(set(matches["home"]) | set(matches["away"])))
 
 
 def with_possession(matches: pd.DataFrame, league: str, start_year: int) -> pd.DataFrame:
     """A szezon meccsei labdabirtoklással kiegészítve (a csapatok játékstílusához)."""
     if "home_possession" in matches.columns:  # a nemzetközi kupák meccsadataiban már benne van
         return matches
-    teams = tuple(sorted(set(matches["home"]) | set(matches["away"])))
-    return model.add_possession(matches, load_possession(league, start_year, teams))
+    return model.add_possession(matches, load_possession(league, start_year, season_teams(matches)))
 
 
-@st.cache_data(ttl=3600, show_spinner="A csapatok hazai bajnoki adatainak letöltése…")
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_cup_models(league: str, start_year: int, day: str, _history: pd.DataFrame) -> dict:
     """A kupa modelljei a megadott nap előtti hazai bajnoki meccsekből (a _history-t a többi paraméter meghatározza)."""
     domestic = {}
@@ -240,31 +316,31 @@ def load_place(city: str, country: str):
     return model.geocode(city, country)
 
 
-@st.cache_data(ttl=3600, show_spinner="Időjárás-előrejelzés letöltése…")
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_forecast(latitude: float, longitude: float) -> pd.DataFrame:
     return model.fetch_forecast(latitude, longitude)
 
 
-@st.cache_data(ttl=900, show_spinner="Kiírt meccsek letöltése…")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_fixtures(league: str, teams: tuple) -> pd.DataFrame:
     return model.fetch_upcoming(league, list(teams))
 
 
-@st.cache_data(ttl=60, show_spinner="Élő adatok letöltése…")
+@st.cache_data(ttl=60, show_spinner=False)
 def load_live(league: str, first_day: str, last_day: str) -> tuple:
     """Az élő forrás eseményei és a letöltés időpontja; egy percig gyorsítótárból jön."""
     events = model.fetch_live(league, pd.Timestamp(first_day), pd.Timestamp(last_day))
     return events, pd.Timestamp.now(tz="Europe/Budapest")
 
 
-@st.cache_data(ttl=900, show_spinner="Szorzók letöltése…")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_odds(league: str, bookmaker_keys: tuple, api_key: str) -> tuple:
     """Az iroda szorzói és a letöltés időpontja; negyedóráig gyorsítótárból jön, hogy kímélje a havi keretet."""
     events, remaining = model.fetch_odds(league, bookmaker_keys, api_key)
     return events, remaining, pd.Timestamp.now(tz="Europe/Budapest")
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Nemzetközi kupameccsek letöltése…")
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def load_cups(first_day: str, last_day: str) -> list:
     return model.fetch_cup_matches(pd.Timestamp(first_day), pd.Timestamp(last_day))
 
@@ -280,7 +356,7 @@ def load_usual(league: str, event_id: str, side: str) -> dict:
     return model.usual_starters(league, load_lineup(league, event_id)[side], load_lineup)
 
 
-@st.cache_data(ttl=900, show_spinner="Hírek letöltése…")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_news(league: str) -> tuple:
     return model.fetch_news(league)
 
@@ -366,16 +442,34 @@ league_box, day_box, corner_box, card_box, refresh_box = st.columns([2, 3, 1, 1,
 with league_box:
     league = st.selectbox("Bajnokság", list(model.LEAGUES), format_func=model.LEAGUES.get)
 
+is_cup = league in model.EUROPEAN_CUPS
 try:
-    season = with_possession(load_season(league, season_start), league, season_start)
-    if league in model.EUROPEAN_CUPS:
-        # Kupában csapatonként kevés a meccs, ezért az előző három szezon számít „korábbinak".
-        previous = pd.concat([load_season(league, season_start - back) for back in (3, 2, 1)], ignore_index=True)
-        older = []
-    else:
-        previous = with_possession(load_season(league, season_start - 1), league, season_start - 1)
-        older = model.older_seasons(league, season_start, load_season)
-    upcoming = load_fixtures(league, tuple(sorted(set(season["home"]) | set(season["away"]))))
+    with st.spinner("Adatok letöltése…"):
+        # Előbb minden szükséges szezon egyszerre letöltve a gyorsítótárba, utána a lenti hívások már onnan jönnek.
+        wanted = [(league, season_start - back) for back in range(4 if is_cup else model.H2H_SEASONS)]
+        if is_cup:  # a kupamodellhez a csapatok hazai bajnokságai is kellenek
+            wanted += [(code, season_start - back) for code in model.CUP_DOMESTIC_LEAGUES for back in (0, 1)]
+        loaded = together([lambda pair=pair: load_season(*pair) for pair in wanted])
+        calls = [lambda: load_news(league)]
+        if loaded[0] is not None:
+            calls.append(lambda: load_fixtures(league, season_teams(loaded[0])))
+        if not is_cup:  # a kupák meccsadataiban már benne van a labdabirtoklás
+            calls += [
+                lambda year=year, matches=matches: load_possession(league, year, season_teams(matches))
+                for year, matches in ((season_start, loaded[0]), (season_start - 1, loaded[1]))
+                if matches is not None
+            ]
+        together(calls)
+
+        season = with_possession(load_season(league, season_start), league, season_start)
+        if is_cup:
+            # Kupában csapatonként kevés a meccs, ezért az előző három szezon számít „korábbinak".
+            previous = pd.concat([load_season(league, season_start - back) for back in (3, 2, 1)], ignore_index=True)
+            older = []
+        else:
+            previous = with_possession(load_season(league, season_start - 1), league, season_start - 1)
+            older = model.older_seasons(league, season_start, load_season)
+        upcoming = load_fixtures(league, season_teams(season))
 except (requests.RequestException, KeyError, ValueError) as error:
     st.error(f"Nem sikerült letölteni az adatokat: {error}")
     st.stop()
@@ -422,6 +516,7 @@ with card_box:
     card_line = st.number_input("Sárgalap-határ", 0.5, 12.5, model.CARD_LINE, step=1.0)
 bookmaker = BOOKMAKER
 odds_api_key = model.odds_api_key()
+odds_feed = model.ODDS_API_BOOKMAKERS.get(bookmaker)
 
 # A modell mindig csak a kiválasztott nap előtti meccsekből számol, így a tipp összevethető az eredménnyel.
 selected_date = pd.Timestamp(selected_day)
@@ -432,14 +527,18 @@ if is_past:
 else:
     fixtures = upcoming[upcoming_day == selected_date].reset_index(drop=True)
 season_history = season[played_day < selected_date]
+if odds_api_key and odds_feed and not is_past:
+    # A szorzók letöltése a leglassabb kérés: már most elindul a háttérben, a szorzós rész a gyorsítótárból veszi.
+    in_background(lambda: load_odds(league, odds_feed, odds_api_key))
 
 history = pd.concat(
     [previous.assign(weight=model.PREV_SEASON_WEIGHT), season_history.assign(weight=1.0)],
     ignore_index=True,
 )
-if league in model.EUROPEAN_CUPS:
+if is_cup:
     # Kupában a gól és a szöglet a csapatok hazai bajnoki erejéből és a ligák erősségéből jön.
-    models = load_cup_models(league, season_start, selected_day, history)
+    with st.spinner("A csapatok hazai bajnoki erejének számítása…"):
+        models = load_cup_models(league, season_start, selected_day, history)
 else:
     models = model.build_models(history)
 form = model.team_form(history)
@@ -507,11 +606,7 @@ tips_tab, stats_tab, info_tab, news_tab = st.tabs(
 names = [f"{match.home} – {match.away}" for match in fixtures.itertuples()]
 # A bajnoki előtti és utáni napok nemzetközi kupameccsei a terheltséghez és a rotációhoz.
 cup_window = pd.Timedelta(days=model.CUP_WINDOW)
-cups = load_cups(f"{selected_date - cup_window:%Y-%m-%d}", f"{selected_date + cup_window:%Y-%m-%d}")
-contexts = {
-    name: model.match_context(match, history, table, cups=cups) for name, match in zip(names, fixtures.itertuples())
-}
-
+cup_days = (f"{selected_date - cup_window:%Y-%m-%d}", f"{selected_date + cup_window:%Y-%m-%d}")
 
 
 def forecast_for(match):
@@ -531,8 +626,17 @@ def forecast_for(match):
         return None
 
 
+# A kupameccsek és a meccsenkénti előrejelzések egyszerre töltődnek le.
 # Az időjárás alapból az előrejelzésből jön; a Körülmények fülön átírható.
-forecasts = {name: forecast_for(match) for name, match in zip(names, fixtures.itertuples())}
+with st.spinner("Körülmények letöltése…"):
+    fetched_cups, *fetched_forecasts = together(
+        [lambda: load_cups(*cup_days), *(lambda match=match: forecast_for(match) for match in fixtures.itertuples())]
+    )
+cups = fetched_cups if fetched_cups is not None else load_cups(*cup_days)
+forecasts = dict(zip(names, fetched_forecasts))
+contexts = {
+    name: model.match_context(match, history, table, cups=cups) for name, match in zip(names, fixtures.itertuples())
+}
 for name, forecast in forecasts.items():
     if forecast:
         contexts[name]["weather"] = forecast["key"]
@@ -660,6 +764,23 @@ if uploaded is not None:
 # Kihirdetett kezdők: a hamarosan kezdődő és az élő meccseknél a kezdőből hiányzó szokásos kezdők
 # automatikusan hiányzónak számítanak. Befejezett meccs tippjeit utólag már nem módosítja.
 if not is_past:
+    # Előbb az érintett meccsek kezdői, majd a csapatok szokásos kezdői egyszerre letöltve a gyorsítótárba.
+    due = [
+        score["id"]
+        for score in scores.values()
+        if score["state"] != "finished" and score["kickoff"] - pd.Timestamp.now(tz="UTC") <= LINEUP_WINDOW
+    ]
+    if due:
+        with st.spinner("Kezdőcsapatok letöltése…"):
+            announced = together([lambda event=event: load_lineup(league, event) for event in due])
+            together(
+                [
+                    lambda event=event, side=side: load_usual(league, event, side)
+                    for event, lineup in zip(due, announced)
+                    if lineup
+                    for side in ("home", "away")
+                ]
+            )
     for match in fixtures.itertuples():
         pair = (match.home, match.away)
         score = scores.get(pair)
@@ -755,7 +876,7 @@ def priced(match_name: str, row: dict) -> dict:
 
 feed = {}  # mezőkulcs -> az API-ból megérkezett szorzó; ami itt nincs, ahhoz nem jött adat
 odds_status = ""
-feed_bookmaker = model.ODDS_API_BOOKMAKERS.get(bookmaker)
+feed_bookmaker = odds_feed
 if odds_api_key and feed_bookmaker and not is_past:
     try:
         odds_events, quota, odds_time = load_odds(league, feed_bookmaker, odds_api_key)
