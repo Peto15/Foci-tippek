@@ -56,6 +56,7 @@ ODDS_API_SPORTS = {
     "D1": "soccer_germany_bundesliga",
     "I1": "soccer_italy_serie_a",
     "F1": "soccer_france_ligue_one",
+    "CL": "soccer_uefa_champs_league",
 }
 # Felületen választható iroda -> a The Odds API irodakulcsai, elsőbbségi sorrendben. A Tippmixpro
 # nincs az API-ban; ugyanarra a Kambi-rendszerre épül, mint az Unibet, ezért annak a szorzóit kapja.
@@ -74,7 +75,29 @@ LEAGUES = {
     "D1": "Bundesliga",
     "I1": "Serie A",
     "F1": "Ligue 1",
+    "CL": "Bajnokok Ligája",
 }
+# Nemzetközi kupák: a football-data.co.uk-n nincsenek meg, ezért a meccsadataik is az ESPN-ről jönnek, és a
+# becslés csak a kupában játszott meccsekre épül (a csapatok hazai bajnoki meccseit nem látja).
+EUROPEAN_CUPS = {"CL"}
+EUROPEAN_FROM_MONTH = 9  # a főtábla szeptemberben indul; a nyári selejtezők kimaradnak
+# A kupacsapatok hazai bajnokságai a football-data.co.uk-n (teljes statisztikával), és a csoportjuk a ligaerősséghez.
+CUP_DOMESTIC_LEAGUES = ["E0", "SP1", "D1", "I1", "F1", "N1", "P1", "B1", "T1", "G1", "SC0"]
+CUP_LEAGUE_GROUP = {"B1": "MINOR", "T1": "MINOR", "G1": "MINOR", "SC0": "MINOR"}  # a többi liga saját csoport
+# Kupameccs várható értéke a csapatok hazai bajnoki erejéből (1 = a saját ligája átlagos csapata):
+#   base × (hazai pályán: home) × támadóerő^attack_power × a liga támadószorzója
+#        × az ellenfél kapott-erő^defence_power × az ellenfél ligájának kapott-szorzója.
+# A "leagues" a ligák erőssége: (támadás, kapott) szorzó – egy angol átlagcsapat a BL-ben 35%-kal több gólt
+# szerez és 28%-kal kevesebbet kap, mint egy átlagos mezőnybeli. NONE: akinek a bajnokságáról nincs adat.
+# Illesztve a 2023/24–2025/26-os BL 503 meccsére; külön szezonokon ellenőrizve (1X2 veszteség a csak
+# BL-meccsekre épülő becsléshez képest: 0,936 → 0,890 és 0,944 → 0,927).
+CUP_MODEL = {
+    "goals": {"base": 1.166, "home": 1.331, "attack_power": 1.33, "defence_power": 0.89, "leagues": {"E0": (1.35, 0.72), "SP1": (1.23, 0.93), "D1": (1.13, 0.89), "I1": (0.89, 0.79), "F1": (1.16, 0.84), "N1": (0.88, 1.46), "P1": (0.79, 1.07), "MINOR": (0.73, 1.35), "NONE": (1.01, 1.21)}},
+    "corners": {"base": 4.149, "home": 1.311, "attack_power": 0.72, "defence_power": 0.63, "leagues": {"E0": (1.10, 0.84), "SP1": (1.14, 0.94), "D1": (1.12, 0.95), "I1": (1.05, 0.92), "F1": (1.14, 0.79), "N1": (1.02, 1.19), "P1": (0.91, 1.17), "MINOR": (0.78, 1.07), "NONE": (0.82, 1.25)}},
+}
+CUP_PRIOR_MATCHES = 12  # a csapat kupameccsei ennyi „hazai bajnoki alapú" meccs súlyával szemben módosítják a becslést
+CUP_UPDATE_DAYS = 500  # az ennél régebbi kupameccsek már nem módosítják a hazai bajnoki alapú becslést
+CUP_NAME_ALIASES = {"Sp Lisbon": "Sporting CP"}  # football-data.co.uk név -> ESPN név, ahol nagyon eltér
 
 # Statisztika -> (hazai, vendég) oszlop a forrásfájlban.
 STATS = {
@@ -104,8 +127,8 @@ MAX_GOALS = 10  # eddig a gólszámig összegezzük a Poisson-eloszlást
 CONFIDENT = 0.60  # e fölötti valószínűségű tipp kap csillagot
 
 GOAL_LINE = 2.5
-CORNER_LINE = 9.5
-CARD_LINE = 4.5
+CORNER_LINE = 7.5
+CARD_LINE = 3.5
 GOAL_LINES = (1.5, 2.5, 3.5)  # a dinamikus gólhatár ezek közül választ
 RECOMMENDED = 0.70  # e fölötti valószínűségű kimenetel ajánlott tipp
 
@@ -142,6 +165,73 @@ WEATHER = {
     "extreme": ("szélsőséges", 0.86, 1.12),
 }
 
+# Játékstílus: a csapat labdabirtoklása és lövésszáma a liga többi csapatához képest.
+STYLE_MIN_MATCHES = 5  # ennél kevesebb (súlyozott) meccsből nem állapít meg stílust
+STYLE_NAMES = {"high": "labdatartó", "mid": "kiegyensúlyozott", "low": "visszaálló"}
+ATTACK_NAMES = {"high": "sokat lövő", "mid": "", "low": "keveset lövő"}
+# Mit hozott a múltban egy-egy párosítás: (hazai stílus, vendég stílus) -> meccsszám, gól, 2,5 gól felett,
+# mindkét csapat gólja, szöglet (hazai, vendég), sárga lap, hazai győzelem, döntetlen. Mért adat: az öt
+# bajnokság 2020/21–2026/27-es meccsei, a csapatok meccs előtti (utolsó 30 meccses) labdabirtoklása szerint.
+STYLE_MATCHUPS = {
+    ("high", "high"): {"n": 1112, "goals": 3.07, "over": 0.58, "btts": 0.60, "corners": (5.4, 4.1), "yellows": 4.1, "home": 0.44, "draw": 0.23},
+    ("high", "mid"): {"n": 1231, "goals": 2.99, "over": 0.57, "btts": 0.54, "corners": (6.0, 3.7), "yellows": 3.9, "home": 0.59, "draw": 0.24},
+    ("high", "low"): {"n": 1150, "goals": 3.02, "over": 0.57, "btts": 0.52, "corners": (6.7, 3.3), "yellows": 3.6, "home": 0.67, "draw": 0.20},
+    ("mid", "high"): {"n": 1177, "goals": 2.88, "over": 0.56, "btts": 0.58, "corners": (4.5, 5.0), "yellows": 4.1, "home": 0.28, "draw": 0.25},
+    ("mid", "mid"): {"n": 1096, "goals": 2.83, "over": 0.55, "btts": 0.57, "corners": (5.3, 4.4), "yellows": 4.2, "home": 0.43, "draw": 0.24},
+    ("mid", "low"): {"n": 1216, "goals": 2.66, "over": 0.50, "btts": 0.53, "corners": (5.7, 4.0), "yellows": 4.1, "home": 0.50, "draw": 0.28},
+    ("low", "high"): {"n": 1203, "goals": 2.82, "over": 0.53, "btts": 0.52, "corners": (4.2, 5.4), "yellows": 3.9, "home": 0.20, "draw": 0.25},
+    ("low", "mid"): {"n": 1163, "goals": 2.63, "over": 0.49, "btts": 0.54, "corners": (4.8, 4.8), "yellows": 4.2, "home": 0.34, "draw": 0.30},
+    ("low", "low"): {"n": 1091, "goals": 2.47, "over": 0.43, "btts": 0.53, "corners": (5.2, 4.3), "yellows": 4.2, "home": 0.41, "draw": 0.30},
+}
+STYLE_AVERAGE = {"goals": 2.82, "over": 0.53, "corners": 9.7, "yellows": 4.0, "draw": 0.25}
+# Amit az átlagokra épülő modell a párosításból nem lát: (gólszorzó, sárgalap-szorzó, döntetlen-többlet).
+# A visszamérésből illesztett értékek; ahol a modell magától is jól számol, ott 1 és 0.
+STYLE_EFFECT = {
+    ("high", "high"): (1.04, 1.00, 0.00),
+    ("high", "mid"): (1.00, 0.98, 0.00),
+    ("high", "low"): (1.03, 0.94, 0.00),
+    ("mid", "mid"): (1.00, 0.97, 0.00),
+    ("mid", "low"): (1.00, 0.98, 0.12),
+    ("low", "high"): (0.97, 1.00, 0.10),
+    ("low", "mid"): (0.97, 1.00, 0.20),
+    ("low", "low"): (0.95, 1.00, 0.30),
+}
+# A csapatok közti különbségből ennyi marad a várható értékben (1 = a mért átlagok változatlanul): a szöglet- és
+# lapátlagok nagy részben a véletlent tükrözik, ezért a ligaátlag felé húzza őket. A visszamérésből illesztve.
+SPREAD = {"goals": 0.6, "corners": 0.4, "yellows": 0.6}
+# A szóródás a Poisson-eloszláséhoz képest (1 = Poisson): a szögletek és a lapok ennél jobban szórnak.
+DISPERSION = {"corners": 1.15, "yellows": 1.1}
+DRAW_BOOST = 0.03  # a döntetlen eredmények esélyének növelése (a független Poisson alábecsüli a döntetlent)
+
+# Időjárás-előrejelzés a stadion városára: kulcs nélküli Open-Meteo (helykereső és óránkénti előrejelzés).
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+FORECAST_DAYS = 16  # ennyi napra előre van előrejelzés
+GEOCODE_COUNTRIES = {"England": "United Kingdom", "Scotland": "United Kingdom", "Wales": "United Kingdom", "USA": "United States"}
+# Az ESPN városneve -> amit a helykereső megtalál (a helyi nevű nagyvárosok helyett különben kis falvakat ad).
+GEOCODE_CITIES = {
+    "Milano": "Milan",
+    "Napoli": "Naples",
+    "Roma": "Rome",
+    "Firenze": "Florence",
+    "Genova": "Genoa",
+    "Venezia": "Venice",
+    "Villarreal": "Vila-real",
+    "La Coruña": "A Coruña",
+    "San Sebastian": "Donostia",
+    "Bodø/Glimt": "Bodø",
+    "Hamburg Norderstedt": "Hamburg",
+    "Newcastle-upon-Tyne": "Newcastle upon Tyne",
+}
+WEATHER_HOURS = 2  # a kezdés órájától ennyi óra átlagát nézi
+RAIN_MM = 0.5  # ennyi mm/óra csapadéktól esős a meccs
+# Szélsőséges idő: ekkora eső (mm/óra), széllökés (km/h), havazás (cm/óra), illetve ilyen hideg vagy meleg (°C).
+EXTREME_RAIN_MM = 4.0
+EXTREME_GUST = 70.0
+EXTREME_SNOW_CM = 0.5
+EXTREME_COLD = -5.0
+EXTREME_HEAT = 33.0
+
 DROP_THRESHOLD = 0.05  # a szorzó ekkora arányú esése számít piaci dropnak
 ODDS_CORRECTION_SECONDS = 120  # ennyi időn belüli átírás javításnak számít, nem piaci mozgásnak
 
@@ -177,7 +267,7 @@ DERBIES = {
 
 # Élő és aznapi eredmények: kulcs nélküli ESPN eredményjelző, bajnokságonként.
 ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
-ESPN_LEAGUES = {"E0": "eng.1", "SP1": "esp.1", "D1": "ger.1", "I1": "ita.1", "F1": "fra.1"}
+ESPN_LEAGUES = {"E0": "eng.1", "SP1": "esp.1", "D1": "ger.1", "I1": "ita.1", "F1": "fra.1", "CL": "uefa.champions"}
 MATCH_MINUTES = 90
 LIVE_MAX_DAYS = 6  # egy forduló legfeljebb ennyi napjára kérdez le élő adatot
 LIVE_NAME_MATCH = 0.6  # ekkora névegyezés kell, hogy egy élő meccset a kiírt meccshez kössünk
@@ -225,6 +315,10 @@ NEWS_SOURCES = {
         ("L'Équipe", "https://dwh.lequipe.fr/api/edito/rss?path=/Football/Ligue-1/"),
         ("RMC Sport", "https://rmcsport.bfmtv.com/rss/football/ligue-1/"),
     ],
+    "CL": [
+        ("BBC Sport", "https://feeds.bbci.co.uk/sport/football/champions-league/rss.xml"),
+        ("Sky Sports", "https://www.skysports.com/rss/12040"),
+    ],
 }
 NEWS_HEADERS = {"User-Agent": "Mozilla/5.0 (foci-tippek hírolvasó)"}
 # Kategória -> szókezdetek, illetve kifejezések (ékezet nélkül, kisbetűvel) a források nyelvein.
@@ -249,6 +343,32 @@ NEWS_KEYWORDS = {
     "sajtótájékoztató": [
         "press conference", "rueda de prensa", "conferenza stampa", "pressekonferenz", "conference de presse",
     ],
+}
+# football-data.co.uk név -> ahogy a sajtó még emlegeti a csapatot (ékezet nélkül, kisbetűvel).
+NEWS_ALIASES = {
+    "Man United": ["manchester united", "man utd"],
+    "Man City": ["manchester city"],
+    "Tottenham": ["spurs"],
+    "Nott'm Forest": ["forest"],
+    "Newcastle": ["magpies"],
+    "Ath Madrid": ["atletico", "atleti"],
+    "Ath Bilbao": ["athletic"],
+    "Barcelona": ["barca"],
+    "Sociedad": ["real sociedad"],
+    "Vallecano": ["rayo"],
+    "Espanol": ["espanyol"],
+    "Paris SG": ["psg"],
+    "Marseille": ["om"],
+    "Lyon": ["ol"],
+    "Bayern Munich": ["bayern", "fc bayern"],
+    "Dortmund": ["bvb", "borussia dortmund"],
+    "M'gladbach": ["gladbach", "monchengladbach"],
+    "Ein Frankfurt": ["eintracht frankfurt", "eintracht"],
+    "FC Koln": ["koln", "cologne"],
+    "Leverkusen": ["bayer 04", "bayer leverkusen"],
+    "Milan": ["rossoneri"],
+    "Inter": ["nerazzurri"],
+    "Juventus": ["juve"],
 }
 NEWS_MAX_AGE_DAYS = 7  # ennél régebbi cikk nem számít friss hírnek (néhány hírfolyam évekre visszamenő)
 SQUAD_NEWS = ("sérülés", "eltiltás", "kezdőcsapat")  # a hiányzókat és kezdőket érintő kategóriák
@@ -303,6 +423,8 @@ def download_csv(url: str) -> pd.DataFrame:
 
 def fetch_matches(league: str, season: str) -> pd.DataFrame:
     """Letölti a szezon meccseit, és a lejátszottakat adja vissza."""
+    if league in EUROPEAN_CUPS:
+        return fetch_matches_espn(league, 2000 + int(season[:2]))
     return parse_matches(download_csv(DATA_URL.format(season=season, league=league)))
 
 
@@ -322,6 +444,69 @@ def parse_matches(raw: pd.DataFrame) -> pd.DataFrame:
         matches[f"away_{stat}"] = raw.get(away_column, NAN)
     matches = matches.dropna(subset=["home_goals", "away_goals"])
     return matches.astype({"home_goals": int, "away_goals": int})
+
+
+def espn_months(league: str, months) -> list:
+    """Az ESPN eredményjelzőjének eseményei a megadott hónapokra; amelyik hónap nem tölthető le, kimarad."""
+
+    def one(month) -> list:
+        try:
+            response = requests.get(
+                ESPN_URL.format(league=ESPN_LEAGUES[league]),
+                params={"dates": month.strftime("%Y%m"), "limit": 300},
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json().get("events", [])
+        except (requests.RequestException, ValueError):
+            return []
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return [event for events in pool.map(one, months) for event in events]
+
+
+def fetch_matches_espn(league: str, start_year: int) -> pd.DataFrame:
+    """Egy nemzetközi kupa szezonjának lejátszott meccsei az ESPN-ről, a fetch_matches oszlopaival.
+
+    A labdabirtoklás (home_possession / away_possession) is benne van. A csapatnevek az ESPN
+    nevei; a dátum a budapesti naptári nap. A selejtezők (EUROPEAN_FROM_MONTH előtt) kimaradnak.
+    """
+    last = min(pd.Period(f"{start_year + 1}-06", "M"), pd.Timestamp.now().to_period("M"))
+    names = {"wonCorners": "corners", "totalShots": "shots", "shotsOnTarget": "shots_on_target", "possessionPct": "possession"}
+    rows = []
+    for event in espn_months(league, pd.period_range(f"{start_year}-{EUROPEAN_FROM_MONTH:02d}", last, freq="M")):
+        competition = event["competitions"][0]
+        sides = {side["homeAway"]: side for side in competition["competitors"]}
+        if set(sides) != {"home", "away"} or not event["status"]["type"].get("completed"):
+            continue
+        row = {
+            "id": event["id"],
+            "date": pd.Timestamp(event["date"]).tz_convert("Europe/Budapest").tz_localize(None).normalize(),
+            "referee": NAN,
+        }
+        for where, side in sides.items():
+            row[where] = side["team"]["displayName"]
+            row[f"{where}_goals"] = int(side.get("score") or 0)
+            row[f"{where}_yellows"] = sum(
+                1
+                for detail in competition.get("details", [])
+                if detail.get("yellowCard") and detail.get("team", {}).get("id") == side["team"]["id"]
+            )
+            values = {entry.get("name"): entry.get("displayValue") for entry in side.get("statistics", [])}
+            for source, stat in names.items():
+                try:
+                    row[f"{where}_{stat}"] = float(values[source])
+                except (KeyError, TypeError, ValueError):
+                    row[f"{where}_{stat}"] = NAN
+        rows.append(row)
+    columns = ["date", "home", "away", "referee"] + [
+        f"{where}_{stat}"
+        for stat in ("goals", "corners", "yellows", "shots", "shots_on_target", "possession")
+        for where in ("home", "away")
+    ]
+    matches = pd.DataFrame(rows).drop_duplicates("id") if rows else pd.DataFrame(columns=["id", *columns])
+    matches = matches[columns].astype({"home_goals": int, "away_goals": int, "date": "datetime64[ns]"})
+    return matches.sort_values("date", kind="stable").reset_index(drop=True)
 
 
 def fetch_fixtures(league: str) -> pd.DataFrame:
@@ -423,6 +608,21 @@ def fetch_news(league: str) -> tuple:
     return items, failed
 
 
+def news_names(team: str) -> set:
+    """A csapat névváltozatai a hírekben való kereséshez (ékezet nélkül, kisbetűvel)."""
+    return {plain_name(team), plain_name(LIVE_ALIASES.get(team, team)), *NEWS_ALIASES.get(team, [])}
+
+
+def team_articles(items: list, team: str) -> list:
+    """A csapatot a címében vagy a bevezetőjében említő összes cikk, témától függetlenül, a legújabbtól."""
+    names = news_names(team)
+    return [
+        item
+        for item in items
+        if any(f" {name} " in f" {plain_name(item['title'] + ' ' + item['summary'])} " for name in names)
+    ]
+
+
 def tag_news(items: list, teams: list) -> list:
     """A meccsek szempontjából fontos cikkek, amelyek a megadott csapatokat említik.
 
@@ -430,7 +630,7 @@ def tag_news(items: list, teams: list) -> list:
     nem illik egyik kategóriába sem (NEWS_KEYWORDS: sérülés, eltiltás,
     kezdőcsapat, edzőváltás, rotáció, sajtótájékoztató), kimarad.
     """
-    names = {team: {plain_name(team), plain_name(LIVE_ALIASES.get(team, team))} for team in teams}
+    names = {team: news_names(team) for team in teams}
     tagged = []
     for item in items:
         text = f" {plain_name(item['title'] + ' ' + item['summary'])} "
@@ -779,7 +979,7 @@ def fetch_live_espn(league: str, first_day, last_day) -> list:
 def fetch_schedule(league: str, teams: list, months: int = SCHEDULE_MONTHS) -> pd.DataFrame:
     """A bajnokság kiírt meccsei hónapokra előre az ESPN-ről, budapesti idő szerint.
 
-    A fetch_fixtures alakjában adja vissza (kickoff, home, away, referee), a csapatokat a
+    A fetch_fixtures alakjában adja vissza (kickoff, home, away, referee, plusz venue, city, country: a stadion), a csapatokat a
     megadott football-data.co.uk nevekre fordítva; amelyik meccs csapatát nem tudja
     egyértelműen azonosítani, vagy amelyiket elhalasztották, kimarad. Az elmúlt
     SCHEDULE_BACK_DAYS nap (élő és frissen befejezett) meccsei is benne vannak. Játékvezetőt nem ad.
@@ -806,9 +1006,37 @@ def fetch_schedule(league: str, teams: list, months: int = SCHEDULE_MONTHS) -> p
             continue
         for team in sides.values():
             names[team["id"]] = [team.get(key, "") for key in ("displayName", "shortDisplayName", "name", "location")]
-        listed.append((kickoff.tz_convert("Europe/Budapest"), sides["home"]["id"], sides["away"]["id"]))
+        venue = event["competitions"][0].get("venue") or {}
+        address = venue.get("address") or {}
+        place = (venue.get("fullName") or "", address.get("city") or "", address.get("country") or "")
+        listed.append((kickoff.tz_convert("Europe/Budapest"), sides["home"]["id"], sides["away"]["id"], place))
 
-    # Egy-egy párosítás a legjobb névegyezéstől lefelé, hogy a hasonló nevű csapatok (Inter – Milan) ne keveredjenek.
+    known = match_team_names(names, teams)
+    rows = [
+        {
+            "kickoff": kickoff,
+            "home": known[home],
+            "away": known[away],
+            "referee": NAN,
+            "venue": place[0],
+            "city": place[1],
+            "country": place[2],
+        }
+        for kickoff, home, away, place in listed
+        if home in known and away in known
+    ]
+    schedule = pd.DataFrame(rows, columns=["kickoff", "home", "away", "referee", "venue", "city", "country"])
+    # Üres menetrendnél is időbélyeg típusú marad az oszlop.
+    schedule["kickoff"] = pd.to_datetime(schedule["kickoff"], utc=True).dt.tz_convert("Europe/Budapest")
+    return schedule.sort_values("kickoff", kind="stable").reset_index(drop=True)
+
+
+def match_team_names(names: dict, teams: list) -> dict:
+    """Az ESPN csapatazonosítóihoz (azonosító -> névváltozatok) a football-data.co.uk csapatnév.
+
+    Egy-egy párosítás a legjobb névegyezéstől lefelé, hogy a hasonló nevű csapatok
+    (Inter – Milan) ne keveredjenek; akit nem tud biztosan azonosítani, kimarad.
+    """
     scores = sorted(
         ((name_score(team, variants), team, team_id) for team_id, variants in names.items() for team in teams),
         key=lambda item: item[0],
@@ -818,15 +1046,138 @@ def fetch_schedule(league: str, teams: list, months: int = SCHEDULE_MONTHS) -> p
     for score, team, team_id in scores:
         if score >= SCHEDULE_NAME_MATCH and team_id not in known and team not in known.values():
             known[team_id] = team
+    return known
+
+
+def fetch_possession(league: str, start_year: int, teams: list) -> pd.DataFrame:
+    """A szezon lejátszott meccseinek labdabirtoklása az ESPN-ről: home, away, home_possession, away_possession (%).
+
+    A football-data.co.uk fájljaiban nincs labdabirtoklás, ezért a csapatok játékstílusához
+    innen jön; a csapatnevek a megadott football-data nevekre fordulnak. Ami nem tölthető le, kimarad.
+    """
+    last = min(pd.Period(f"{start_year + 1}-06", "M"), pd.Timestamp.now().to_period("M"))
+
+    def one(month) -> list:
+        try:
+            response = requests.get(
+                ESPN_URL.format(league=ESPN_LEAGUES[league]),
+                params={"dates": month.strftime("%Y%m"), "limit": 300},
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json().get("events", [])
+        except (requests.RequestException, ValueError):
+            return []
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        events = [event for month in pool.map(one, pd.period_range(f"{start_year}-08", last, freq="M")) for event in month]
+
+    names, played = {}, []
+    for event in events:
+        sides = {side["homeAway"]: side for side in event["competitions"][0]["competitors"]}
+        if set(sides) != {"home", "away"} or not event["status"]["type"].get("completed"):
+            continue
+        share = {}
+        for where, side in sides.items():
+            team = side["team"]
+            names[team["id"]] = [team.get(key, "") for key in ("displayName", "shortDisplayName", "name", "location")]
+            for entry in side.get("statistics", []):
+                if entry.get("name") == "possessionPct":
+                    try:
+                        share[where] = float(entry.get("displayValue"))
+                    except (TypeError, ValueError):
+                        pass
+        # Hiányzó adatnál a forrás 0-t ad; a két érték összege valódi adatnál 100 körüli.
+        if len(share) == 2 and 95 <= sum(share.values()) <= 105 and min(share.values()) > 0:
+            played.append((sides["home"]["team"]["id"], sides["away"]["team"]["id"], share["home"], share["away"]))
+    known = match_team_names(names, teams)
     rows = [
-        {"kickoff": kickoff, "home": known[home], "away": known[away], "referee": NAN}
-        for kickoff, home, away in listed
+        {"home": known[home], "away": known[away], "home_possession": home_share, "away_possession": away_share}
+        for home, away, home_share, away_share in played
         if home in known and away in known
     ]
-    schedule = pd.DataFrame(rows, columns=["kickoff", "home", "away", "referee"])
-    # Üres menetrendnél is időbélyeg típusú marad az oszlop.
-    schedule["kickoff"] = pd.to_datetime(schedule["kickoff"], utc=True).dt.tz_convert("Europe/Budapest")
-    return schedule.sort_values("kickoff", kind="stable").reset_index(drop=True)
+    table = pd.DataFrame(rows, columns=["home", "away", "home_possession", "away_possession"])
+    return table.drop_duplicates(["home", "away"], keep="last").reset_index(drop=True)
+
+
+def geocode(city: str, country: str = ""):
+    """A város (szélesség, hosszúság) koordinátái, vagy None, ha nem található.
+
+    Több azonos nevű hely közül a megadott országban lévők (ennek híján az összes) legnépesebbjét választja.
+    """
+    name = GEOCODE_CITIES.get(city, city)
+    response = requests.get(GEOCODE_URL, params={"name": name, "count": 10, "language": "en"}, timeout=20)
+    response.raise_for_status()
+    results = response.json().get("results", [])
+    if not results:
+        return None
+    wanted = GEOCODE_COUNTRIES.get(country, country)
+    places = [place for place in results if place.get("country") == wanted] or results
+    best = max(places, key=lambda place: place.get("population") or 0)
+    return float(best["latitude"]), float(best["longitude"])
+
+
+def fetch_forecast(latitude: float, longitude: float) -> pd.DataFrame:
+    """Óránkénti előrejelzés a helyre FORECAST_DAYS napra: temperature (°C), rain (mm), wind, gusts (km/h), snow (cm); az index UTC idő."""
+    response = requests.get(
+        FORECAST_URL,
+        params={
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "temperature_2m,precipitation,wind_speed_10m,wind_gusts_10m,snowfall",
+            "forecast_days": FORECAST_DAYS,
+            "timezone": "UTC",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    hourly = response.json()["hourly"]
+    return pd.DataFrame(
+        {
+            "temperature": hourly["temperature_2m"],
+            "rain": hourly["precipitation"],
+            "wind": hourly["wind_speed_10m"],
+            "gusts": hourly["wind_gusts_10m"],
+            "snow": hourly["snowfall"],
+        },
+        index=pd.to_datetime(hourly["time"], utc=True),
+    ).astype(float)
+
+
+def match_weather(forecast: pd.DataFrame, kickoff):
+    """A meccs idejére várható időjárás az előrejelzésből, vagy None, ha arra az időre még nincs előrejelzés.
+
+    Eredmény: {"key" (a WEATHER kulcsa: normal / rain / extreme), "temperature", "rain" (mm/óra), "wind",
+    "gusts", "snow", "text" (rövid leírás)}. A kezdés órájától WEATHER_HOURS óra átlagát, a lökéseknél a csúcsát veszi.
+    """
+    start = pd.Timestamp(kickoff).tz_convert("UTC").floor("h")
+    hours = forecast.loc[start : start + pd.Timedelta(hours=WEATHER_HOURS - 1)].dropna()
+    if len(hours) < WEATHER_HOURS:
+        return None
+    weather = {
+        "temperature": float(hours["temperature"].mean()),
+        "rain": float(hours["rain"].mean()),
+        "wind": float(hours["wind"].mean()),
+        "gusts": float(hours["gusts"].max()),
+        "snow": float(hours["snow"].mean()),
+    }
+    extreme = (
+        weather["rain"] >= EXTREME_RAIN_MM
+        or weather["gusts"] >= EXTREME_GUST
+        or weather["snow"] >= EXTREME_SNOW_CM
+        or not EXTREME_COLD < weather["temperature"] < EXTREME_HEAT
+    )
+    weather["key"] = "extreme" if extreme else "rain" if weather["rain"] >= RAIN_MM or weather["snow"] > 0 else "normal"
+    parts = [f"{weather['temperature']:.0f} °C"]
+    if weather["snow"] > 0:
+        parts.append(f"hó {number_text(weather['snow'])} cm/óra")
+    elif weather["rain"] >= 0.1:
+        parts.append(f"eső {number_text(weather['rain'])} mm/óra")
+    else:
+        parts.append("száraz")
+    parts.append(f"szél {weather['wind']:.0f} km/h" + (f" (lökések {weather['gusts']:.0f})" if weather["gusts"] >= 50 else ""))
+    weather["text"] = ", ".join(parts)
+    return weather
 
 
 def fetch_upcoming(league: str, teams: list) -> pd.DataFrame:
@@ -1039,6 +1390,114 @@ def add_xg(matches: pd.DataFrame) -> pd.DataFrame:
     return matches
 
 
+def add_possession(matches: pd.DataFrame, possession: pd.DataFrame) -> pd.DataFrame:
+    """A meccsekhez hozzáfűzi a labdabirtoklást (home_possession / away_possession); ahol nincs adat, üres marad."""
+    return matches.merge(possession, on=["home", "away"], how="left")
+
+
+def team_styles(history: pd.DataFrame):
+    """Csapatonként a játékstílus a meccsekből, vagy None, ha nincs labdabirtoklási adat.
+
+    Oszlopok: possession (%), shots_for, shots_against, corners_for, corners_against (meccsenkénti
+    súlyozott átlag), style és attack (high / mid / low: a liga felső, középső, alsó harmada
+    labdabirtoklásban, illetve lövésszámban), label (szöveges jellemzés).
+    """
+    needed = {"home_possession", "away_possession", "home_shots", "away_shots"}
+    if not needed <= set(history.columns):
+        return None
+    sides = []
+    for own, other in (("home", "away"), ("away", "home")):
+        sides.append(
+            pd.DataFrame(
+                {
+                    "team": history[own],
+                    "weight": history["weight"],
+                    "possession": history[f"{own}_possession"],
+                    "shots_for": history[f"{own}_shots"],
+                    "shots_against": history[f"{other}_shots"],
+                    "corners_for": history[f"{own}_corners"],
+                    "corners_against": history[f"{other}_corners"],
+                }
+            )
+        )
+    rows = pd.concat(sides, ignore_index=True).dropna(subset=["possession", "shots_for", "shots_against"])
+    if rows.empty:
+        return None
+    columns = ["possession", "shots_for", "shots_against", "corners_for", "corners_against"]
+    weighted = rows[columns].multiply(rows["weight"], axis=0).assign(team=rows["team"], weight=rows["weight"])
+    totals = weighted.groupby("team").sum()
+    styles = totals[columns].div(totals["weight"], axis=0)
+    styles = styles[totals["weight"] >= STYLE_MIN_MATCHES]
+    if len(styles) < 6:
+        return None
+
+    def third(values: pd.Series) -> pd.Series:
+        rank = values.rank(pct=True)
+        return pd.Series(np.where(rank > 2 / 3, "high", np.where(rank <= 1 / 3, "low", "mid")), index=values.index)
+
+    styles["style"] = third(styles["possession"])
+    styles["attack"] = third(styles["shots_for"])
+    styles["label"] = [
+        ", ".join(part for part in (STYLE_NAMES[style], ATTACK_NAMES[attack]) if part)
+        for style, attack in zip(styles["style"], styles["attack"])
+    ]
+    return styles
+
+
+def number_text(value: float, digits: int = 1) -> str:
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def style_reading(styles, home: str, away: str):
+    """A párosítás „emberi" olvasata a két csapat stílusából, vagy None, ha valamelyiké nem ismert.
+
+    Eredmény: {"home", "away" (a csapat stílussora), "key" (stíluspár), "matchup" (a STYLE_MATCHUPS
+    sora), "lines" (szöveges magyarázat: a két csapat jellemzése és hogy mit hozott eddig az ilyen párosítás)}.
+    """
+    if styles is None or home not in styles.index or away not in styles.index:
+        return None
+    own, other = styles.loc[home], styles.loc[away]
+    key = (own["style"], other["style"])
+    past = STYLE_MATCHUPS[key]
+
+    def profile(team: str, row) -> str:
+        return (
+            f"{team}: {row['label']} csapat – {number_text(row['possession'], 0)}% labdabirtoklás, "
+            f"{number_text(row['shots_for'])} lövés és {number_text(row['corners_for'])} szöglet meccsenként, "
+            f"az ellenfelei {number_text(row['shots_against'])} lövésig jutnak."
+        )
+
+    pictures = {
+        ("high", "high"): "Két labdatartó csapat: nyílt, sok helyzetet hozó meccs várható, mindkét kapu előtt van esemény.",
+        ("high", "mid"): "A hazai csapat birtokolja többet a labdát, és ő irányítja a meccset.",
+        ("high", "low"): "A hazai csapat nyom, a vendég visszaáll és kontrákra vár: egykapuzás jellegű meccs, a szögletek zöme a hazaiaké, kevés a lap.",
+        ("mid", "high"): "A vendég a labdatartóbb csapat, a hazaiaknak több védekezés jut.",
+        ("mid", "mid"): "Két kiegyensúlyozott stílusú csapat, egyik sem enged át tartósan területet.",
+        ("mid", "low"): "A vendég visszaáll; a hazaiaknak kell feltörniük a zárt védelmet, ez általában kevesebb gólt hoz.",
+        ("low", "high"): "A vendég birtokolja a labdát, a hazai csapat a saját pályáján is visszaáll és kontrázik.",
+        ("low", "mid"): "A hazai csapat inkább kivár; lassabb, kevesebb gólos meccs, gyakori a döntetlen.",
+        ("low", "low"): "Két visszaálló csapat: egyik sem vállalja a játék irányítását, ezért kevés a gól és gyakori a döntetlen.",
+    }
+    lines = [
+        profile(home, own),
+        profile(away, other),
+        pictures[key],
+        (
+            f"Ilyen párosításban ({STYLE_NAMES[key[0]]} hazai – {STYLE_NAMES[key[1]]} vendég) {past['n']} korábbi meccsen: "
+            f"átlag {number_text(past['goals'], 2)} gól (2,5 felett {past['over']:.0%}, mindkét csapat gólja {past['btts']:.0%}), "
+            f"{number_text(sum(past['corners']))} szöglet ({number_text(past['corners'][0])} hazai – "
+            f"{number_text(past['corners'][1])} vendég), {number_text(past['yellows'])} sárga lap, "
+            f"hazai győzelem {past['home']:.0%}, döntetlen {past['draw']:.0%}."
+        ),
+        (
+            f"Viszonyításul az összes meccs átlaga: {number_text(STYLE_AVERAGE['goals'], 2)} gól, "
+            f"{number_text(STYLE_AVERAGE['corners'])} szöglet, {number_text(STYLE_AVERAGE['yellows'])} sárga lap, "
+            f"döntetlen {STYLE_AVERAGE['draw']:.0%}."
+        ),
+    ]
+    return {"home": own, "away": other, "key": key, "matchup": past, "lines": lines}
+
+
 def build_models(history: pd.DataFrame) -> dict:
     """A gól-, szöglet- és lapmodell, valamint az xG-modell ("xg"; None, ha nincs lövésadat).
 
@@ -1048,6 +1507,126 @@ def build_models(history: pd.DataFrame) -> dict:
     stats = (*STATS, "xg")
     models = {stat: stat_model(history, stat) for stat in stats}
     models["derby"] = {stat: stat_model(history, stat, FORM_WEIGHT * DERBY_FORM_SHARE) for stat in stats}
+    models["styles"] = team_styles(history)
+    return models
+
+
+def domestic_strengths(domestic: dict) -> dict:
+    """A hazai bajnokságok csapatainak ereje: (liga, csapat) -> {"goals": (támadás, kapott), "corners": (...)}.
+
+    A domestic liga -> súlyozott meccsek (mint a build_models bemenete). Az erő a csapat átlaga a
+    ligaátlaghoz képest (1 = átlagos); a gólnál az xG XG_WEIGHT súllyal számít, ahogy a bajnoki modellben.
+    """
+    strengths = {}
+    for league, history in domestic.items():
+        history = add_xg(history)
+        relative = {}
+        for stat in ("goals", "xg", "corners"):
+            model = stat_model(history, stat)
+            if model is not None:
+                average = (model["home_avg"] + model["away_avg"]) / 2
+                relative[stat] = (model["teams"]["own_avg"] / average, model["teams"]["opponent_avg"] / average)
+        if "goals" not in relative:
+            continue
+        chances = relative.get("xg", relative["goals"])
+        for team in relative["goals"][0].index:
+            goals = tuple(
+                (1 - XG_WEIGHT) * relative["goals"][side][team] + XG_WEIGHT * chances[side].get(team, relative["goals"][side][team])
+                for side in (0, 1)
+            )
+            corners = tuple(relative["corners"][side].get(team, 1.0) for side in (0, 1)) if "corners" in relative else (1.0, 1.0)
+            strengths[(league, team)] = {"goals": goals, "corners": corners}
+    return strengths
+
+
+def cup_team_leagues(teams: list, strengths: dict) -> dict:
+    """A kupa csapataihoz (ESPN-név) a hazai bajnoki megfelelőjük: név -> (liga, football-data név); akit nem talál, kimarad."""
+    known = {}
+    for team in teams:
+        best, best_score = None, SCHEDULE_NAME_MATCH
+        for league, name in strengths:
+            score = 1.0 if CUP_NAME_ALIASES.get(name) == team else name_score(name, [team])
+            if score > best_score or (score == best_score and best is None):
+                best, best_score = (league, name), score
+        if best is not None:
+            known[team] = best
+    return known
+
+
+def cup_stat_model(history: pd.DataFrame, stat: str, leagues: dict, strengths: dict) -> dict:
+    """Egy kupa gól- vagy szögletmodellje a stat_model alakjában, a csapatok hazai bajnoki erejéből (lásd CUP_MODEL).
+
+    A hazai bajnoki alapú becslést a csapat friss kupameccsei módosítják: a tényleges és a várt érték
+    aránya, CUP_PRIOR_MATCHES meccsnyi súllyal a ligaerősségből számolt érték felé húzva.
+    """
+    settings = CUP_MODEL[stat]
+    teams = sorted(set(history["home"]) | set(history["away"]) | set(leagues))
+
+    def strength(team: str) -> tuple:
+        league, name = leagues.get(team, ("NONE", None))
+        attack, concede = strengths[(league, name)][stat] if name else (1.0, 1.0)
+        league_attack, league_concede = settings["leagues"][CUP_LEAGUE_GROUP.get(league, league)]
+        return (
+            max(attack, 0.05) ** settings["attack_power"] * league_attack,
+            max(concede, 0.05) ** settings["defence_power"] * league_concede,
+        )
+
+    base = {team: strength(team) for team in teams}
+    # A friss kupameccsek: mennyit szerzett és kapott a csapat ahhoz képest, amit a bajnoki ereje alapján vártunk.
+    recent = history.dropna(subset=[f"home_{stat}", f"away_{stat}"])
+    if not recent.empty:
+        recent = recent[recent["date"] >= recent["date"].max() - pd.Timedelta(days=CUP_UPDATE_DAYS)]
+    prior = CUP_PRIOR_MATCHES * settings["base"] * (1 + settings["home"]) / 2
+    scored = {team: [prior, prior] for team in teams}  # tényleges, várt szerzett
+    conceded = {team: [prior, prior] for team in teams}
+    for row in recent.itertuples():
+        for team, other, value, venue in (
+            (row.home, row.away, getattr(row, f"home_{stat}"), settings["home"]),
+            (row.away, row.home, getattr(row, f"away_{stat}"), 1.0),
+        ):
+            expected_value = settings["base"] * venue * base[team][0] * base[other][1]
+            scored[team][0] += row.weight * value
+            scored[team][1] += row.weight * expected_value
+            conceded[other][0] += row.weight * value
+            conceded[other][1] += row.weight * expected_value
+    table = pd.DataFrame(
+        {
+            "attack": {team: base[team][0] * scored[team][0] / scored[team][1] for team in teams},
+            "concede": {team: base[team][1] * conceded[team][0] / conceded[team][1] for team in teams},
+        }
+    )
+    middle = settings["base"] * (1 + settings["home"]) / 2
+    return {
+        "teams": pd.DataFrame(
+            {
+                "own_avg": middle * table["attack"],
+                "opponent_avg": middle * table["concede"],
+                "own_strength_home": table["attack"],
+                "own_strength_away": table["attack"],
+                "opponent_strength_home": table["concede"],
+                "opponent_strength_away": table["concede"],
+            }
+        ),
+        "home_avg": settings["base"] * settings["home"],
+        "away_avg": settings["base"],
+        "calibrated": True,  # mért összefüggésből jön, a ligaátlag felé húzás (SPREAD) nem kell rá
+    }
+
+
+def build_cup_models(history: pd.DataFrame, domestic: dict) -> dict:
+    """Egy nemzetközi kupa modelljei: a gól és a szöglet a csapatok hazai bajnoki erejéből és a ligák erősségéből.
+
+    A history a kupa súlyozott meccsei, a domestic a hazai bajnokságoké (liga -> meccsek). A sárga lap
+    és a játékstílus továbbra is a kupameccsekből jön. A "leagues" kulcs alatt a csapatok bajnoksága áll.
+    """
+    models = build_models(history)
+    strengths = domestic_strengths(domestic)
+    leagues = cup_team_leagues(sorted(set(history["home"]) | set(history["away"])), strengths)
+    for group in (models, models["derby"]):
+        for stat in CUP_MODEL:
+            group[stat] = cup_stat_model(history, stat, leagues, strengths)
+        group["xg"] = None  # az xG már benne van a hazai bajnoki erőben
+    models["leagues"] = leagues
     return models
 
 
@@ -1260,12 +1839,21 @@ def poisson(expected_value: float, k: int) -> float:
     return math.exp(-expected_value) * expected_value**k / math.factorial(k)
 
 
-def predict(home_xg: float, away_xg: float) -> dict:
-    """A két várható gólszámból kiszámolja a gólpiacok kimeneteleinek valószínűségét."""
+def predict(home_xg: float, away_xg: float, draw_boost: float = 0.0) -> dict:
+    """A két várható gólszámból kiszámolja a gólpiacok kimeneteleinek valószínűségét.
+
+    A draw_boost a döntetlen eredmények esélyét növeli arányosan (a többit ennek megfelelően csökkenti).
+    """
     probs = {"1": 0.0, "X": 0.0, "2": 0.0, "over": 0.0, "btts": 0.0}
+    home_chances = [poisson(home_xg, goals) for goals in range(MAX_GOALS + 1)]
+    away_chances = [poisson(away_xg, goals) for goals in range(MAX_GOALS + 1)]
+    level = sum(home * away for home, away in zip(home_chances, away_chances))
+    scale = 1 / (1 + draw_boost * level)
     for home_goals in range(MAX_GOALS + 1):
         for away_goals in range(MAX_GOALS + 1):
-            p = poisson(home_xg, home_goals) * poisson(away_xg, away_goals)
+            p = home_chances[home_goals] * away_chances[away_goals] * scale
+            if home_goals == away_goals:
+                p *= 1 + draw_boost
             if home_goals > away_goals:
                 probs["1"] += p
             elif home_goals == away_goals:
@@ -1279,9 +1867,20 @@ def predict(home_xg: float, away_xg: float) -> dict:
     return probs
 
 
-def over_under(expected_total: float, line: float) -> dict:
-    """Több/Kevesebb esély egy Poisson-eloszlású összegre (szöglet, lap)."""
-    under = sum(poisson(expected_total, k) for k in range(int(line) + 1))
+def count_chance(expected_value: float, k: int, dispersion: float = 1.0) -> float:
+    """Egy darabszám esélye: Poisson, 1 feletti szóródásnál (szórásnégyzet / átlag) negatív binomiális."""
+    if dispersion <= 1.001:
+        return poisson(expected_value, k)
+    size = expected_value / (dispersion - 1)
+    share = size / (size + expected_value)
+    return math.exp(
+        math.lgamma(k + size) - math.lgamma(size) - math.lgamma(k + 1) + size * math.log(share) + k * math.log(1 - share)
+    )
+
+
+def over_under(expected_total: float, line: float, dispersion: float = 1.0) -> dict:
+    """Több/Kevesebb esély egy darabszám összegére (gól, szöglet, lap); lásd count_chance."""
+    under = sum(count_chance(expected_total, k, dispersion) for k in range(int(line) + 1))
     return {"Több": 1 - under, "Kevesebb": under}
 
 
@@ -1388,9 +1987,9 @@ def referee_factor(history: pd.DataFrame, referee) -> tuple:
     return factor, text
 
 
-def build_markets(values: dict, corner_line: float, card_line: float) -> list:
+def build_markets(values: dict, corner_line: float, card_line: float, draw_boost: float = 0.0) -> list:
     """A várható értékekből (stat -> (hazai, vendég)) a piacok és esélyeik."""
-    probs = predict(*values["goals"])
+    probs = predict(*values["goals"], draw_boost)
     markets = [
         {
             "name": "1X2",
@@ -1425,7 +2024,7 @@ def build_markets(values: dict, corner_line: float, card_line: float) -> list:
                 "values": values[stat],
                 "outcomes": None
                 if math.isnan(home_value)
-                else over_under(home_value + away_value, line),
+                else over_under(home_value + away_value, line, DISPERSION[stat]),
             }
         )
     return markets
@@ -1474,6 +2073,7 @@ def analyse(
     home, away = match.home, match.away
     context = context or {}
     derby = bool(context.get("derby"))
+    reading = style_reading(models.get("styles"), home, away)
     if derby and "derby" in models:
         models = models["derby"]
     base = {stat: expected(models[stat], home, away) for stat in STATS}
@@ -1484,6 +2084,19 @@ def analyse(
                 (1 - XG_WEIGHT) * goals + XG_WEIGHT * chance for goals, chance in zip(base["goals"], chances)
             )
     base = apply_h2h(base, models, history if h2h is None else h2h, home, away)
+    # A csapatok közti különbséget a ligaátlag felé húzza (SPREAD), majd jön a párosítás stílusából adódó
+    # korrekció: amit két ilyen jellegű csapat meccse a puszta átlagokhoz képest hozni szokott.
+    raw = dict(base)
+    style_goals, style_cards, style_draw = STYLE_EFFECT.get(reading["key"], (1.0, 1.0, 0.0)) if reading else (1.0, 1.0, 0.0)
+    for stat, style_factor in (("goals", style_goals), ("corners", 1.0), ("yellows", style_cards)):
+        total = sum(base[stat])
+        if models[stat] is None or math.isnan(total) or total <= 0:
+            continue
+        league_total = models[stat]["home_avg"] + models[stat]["away_avg"]
+        spread = 1.0 if models[stat].get("calibrated") else SPREAD[stat]
+        factor = (league_total + spread * (total - league_total)) / total * style_factor
+        base[stat] = tuple(value * factor for value in base[stat])
+    draw_boost = DRAW_BOOST + style_draw
 
     team_news = news.get((home, away), {})
     absences = {home: team_news.get("home", []), away: team_news.get("away", [])}
@@ -1532,8 +2145,8 @@ def analyse(
         for value, team in zip(base["yellows"], (home, away))
     )
 
-    markets = build_markets(adjusted, corner_line, card_line)
-    for market, before in zip(markets, build_markets(base, corner_line, card_line)):
+    markets = build_markets(adjusted, corner_line, card_line, draw_boost)
+    for market, before in zip(markets, build_markets(base, corner_line, card_line, draw_boost)):
         market["note"] = influence(before["outcomes"], market["outcomes"])
 
     notes = []
@@ -1582,7 +2195,7 @@ def analyse(
             )
     # Hiányzó alapemberek száma csapatonként: a tippajánló ebből ítéli meg a meccs kockázatát.
     key_absences = {team: sum(1 for absence in absences[team] if absence["key"]) for team in (home, away)}
-    return {"markets": markets, "notes": notes, "key_absences": key_absences}
+    return {"markets": markets, "notes": notes, "key_absences": key_absences, "style": reading, "raw": raw}
 
 
 def print_wrapped(text: str, indent: str) -> None:

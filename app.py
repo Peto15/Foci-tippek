@@ -22,7 +22,7 @@ POSITIONS = {"Kapus": "G", "Védő": "D", "Középpályás": "M", "Támadó": "F
 REASONS = ["sérült", "eltiltott", "egyéb"]
 
 ODDS_PREFIX = "odds|"
-# A beírt szorzók naplója: innen töltődnek vissza újraindítás után, és ebből látszik a szorzók mozgása.
+# Az automatikusan letöltött szorzók naplója: ebből látszik a szorzók mozgása, és a kezdés előtti utolsó szorzó.
 ODDS_LOG = Path(__file__).with_name("odds_log.json")
 # Az élő forrás állapotnevei a nem lejátszott meccsekre.
 STATUS_NOTES = {
@@ -65,6 +65,7 @@ NEWS_IMPACT = {
     ),
 }
 WEATHER_KEYS = {label: key for key, (label, _, _) in model.WEATHER.items()}
+CUP_SHORT = {"Bajnokok Ligája": "BL", "Európa-liga": "EL", "Konferencia-liga": "KL"}
 
 # Az alapszínek a .streamlit/config.toml témájából jönnek; ez a kártyákat, füleket és gombokat formázza.
 STYLE = """
@@ -187,15 +188,52 @@ STYLE = """
 st.set_page_config(page_title="Foci tippek", page_icon="⚽", layout="wide")
 st.html(STYLE)
 
-# A Streamlit eldobja az éppen nem látszó mezők értékét; így a beírt szorzók meccsváltáskor is megmaradnak.
-for state_key in list(st.session_state):
-    if isinstance(state_key, str) and state_key.startswith(ODDS_PREFIX):
-        st.session_state[state_key] = st.session_state[state_key]
-
 
 @st.cache_data(ttl=3600, show_spinner="Meccsek letöltése…")
 def load_season(league: str, start_year: int) -> pd.DataFrame:
     return model.fetch_matches(league, model.season_code(start_year))
+
+
+@st.cache_data(ttl=21600, show_spinner="Játékstílus-adatok letöltése…")
+def load_possession(league: str, start_year: int, teams: tuple) -> pd.DataFrame:
+    return model.fetch_possession(league, start_year, list(teams))
+
+
+def with_possession(matches: pd.DataFrame, league: str, start_year: int) -> pd.DataFrame:
+    """A szezon meccsei labdabirtoklással kiegészítve (a csapatok játékstílusához)."""
+    if "home_possession" in matches.columns:  # a nemzetközi kupák meccsadataiban már benne van
+        return matches
+    teams = tuple(sorted(set(matches["home"]) | set(matches["away"])))
+    return model.add_possession(matches, load_possession(league, start_year, teams))
+
+
+@st.cache_data(ttl=3600, show_spinner="A csapatok hazai bajnoki adatainak letöltése…")
+def load_cup_models(league: str, start_year: int, day: str, _history: pd.DataFrame) -> dict:
+    """A kupa modelljei a megadott nap előtti hazai bajnoki meccsekből (a _history-t a többi paraméter meghatározza)."""
+    domestic = {}
+    for code in model.CUP_DOMESTIC_LEAGUES:
+        try:
+            current = load_season(code, start_year)
+            domestic[code] = pd.concat(
+                [
+                    load_season(code, start_year - 1).assign(weight=model.PREV_SEASON_WEIGHT),
+                    current[current["date"] < pd.Timestamp(day)].assign(weight=1.0),
+                ],
+                ignore_index=True,
+            )
+        except (requests.RequestException, KeyError, ValueError):
+            continue  # amelyik bajnokság nem tölthető le, annak csapatai adat nélkülinek számítanak
+    return model.build_cup_models(_history, domestic)
+
+
+@st.cache_data(ttl=30 * 86400, show_spinner=False)
+def load_place(city: str, country: str):
+    return model.geocode(city, country)
+
+
+@st.cache_data(ttl=3600, show_spinner="Időjárás-előrejelzés letöltése…")
+def load_forecast(latitude: float, longitude: float) -> pd.DataFrame:
+    return model.fetch_forecast(latitude, longitude)
 
 
 @st.cache_data(ttl=900, show_spinner="Kiírt meccsek letöltése…")
@@ -311,18 +349,24 @@ def percent(value):
     return None if value is None or math.isnan(value) else round(value * 100)
 
 
-# --- Oldalsáv: bajnokság, nap, határok ----------------------------------------
+# --- Felső sáv: bajnokság, nap, határok ---------------------------------------
 
 season_start = model.current_season_start()  # mindig az idei szezon
-with st.sidebar:
-    st.header("Beállítások")
+BOOKMAKER = "Unibet"  # a szorzók a The Odds API-ból jönnek; a kulcs a .env fájlból vagy a környezetből töltődik be
+league_box, day_box, corner_box, card_box, refresh_box = st.columns([2, 3, 1, 1, 1], vertical_alignment="bottom")
+with league_box:
     league = st.selectbox("Bajnokság", list(model.LEAGUES), format_func=model.LEAGUES.get)
 
 try:
-    season = load_season(league, season_start)
-    previous = load_season(league, season_start - 1)
+    season = with_possession(load_season(league, season_start), league, season_start)
+    if league in model.EUROPEAN_CUPS:
+        # Kupában csapatonként kevés a meccs, ezért az előző három szezon számít „korábbinak".
+        previous = pd.concat([load_season(league, season_start - back) for back in (3, 2, 1)], ignore_index=True)
+        older = []
+    else:
+        previous = with_possession(load_season(league, season_start - 1), league, season_start - 1)
+        older = model.older_seasons(league, season_start, load_season)
     upcoming = load_fixtures(league, tuple(sorted(set(season["home"]) | set(season["away"]))))
-    older = model.older_seasons(league, season_start, load_season)
 except (requests.RequestException, KeyError, ValueError) as error:
     st.error(f"Nem sikerült letölteni az adatokat: {error}")
     st.stop()
@@ -349,10 +393,10 @@ def day_label(option: str) -> str:
     return f"{day:%Y.%m.%d.} ({model.WEEKDAYS[day.weekday()]}) · {day_counts[option]} meccs{listed}"
 
 
-with st.sidebar:
-    if not day_counts:
-        st.info("Ebben a szezonban még nincs meccs.")
-        st.stop()
+if not day_counts:
+    st.info("Ebben a szezonban még nincs meccs.")
+    st.stop()
+with day_box:
     day_options = list(day_counts)
     today = f"{pd.Timestamp.now(tz='Europe/Budapest'):%Y-%m-%d}"
     selected_day = st.selectbox(
@@ -361,19 +405,14 @@ with st.sidebar:
         # Alapból a mai nap, vagy ha ma nincs meccs, a legközelebbi kiírt nap.
         index=next((index for index, day in enumerate(upcoming_days) if day >= today), 0),
         format_func=day_label,
+        help="A kiírt napok budapesti idő szerint, a lejátszott napok a meccsadatok dátuma szerint szerepelnek.",
     )
-    bookmaker = st.selectbox("Fogadóiroda", model.BOOKMAKERS)
-    odds_api_key = st.text_input(
-        "The Odds API-kulcs",
-        value=model.odds_api_key(),
-        type="password",
-        help="Kulccsal a Tippmixpro és az Unibet oszlopba az Unibet szorzói automatikusan betöltődnek "
-        "(the-odds-api.com). A kulcs a projektmappa .env fájljából töltődik be (ODDS_API_KEY=...).",
-    ).strip()
-    st.divider()
-    corner_line =st.number_input("Szöglethatár", 0.5, 20.5, model.CORNER_LINE, step=1.0)
+with corner_box:
+    corner_line = st.number_input("Szöglethatár", 0.5, 20.5, model.CORNER_LINE, step=1.0)
+with card_box:
     card_line = st.number_input("Sárgalap-határ", 0.5, 12.5, model.CARD_LINE, step=1.0)
-    st.caption("A kiírt napok budapesti idő szerint, a lejátszott napok a meccsadatok dátuma szerint szerepelnek.")
+bookmaker = BOOKMAKER
+odds_api_key = model.odds_api_key()
 
 # A modell mindig csak a kiválasztott nap előtti meccsekből számol, így a tipp összevethető az eredménnyel.
 selected_date = pd.Timestamp(selected_day)
@@ -389,7 +428,11 @@ history = pd.concat(
     [previous.assign(weight=model.PREV_SEASON_WEIGHT), season_history.assign(weight=1.0)],
     ignore_index=True,
 )
-models = model.build_models(history)
+if league in model.EUROPEAN_CUPS:
+    # Kupában a gól és a szöglet a csapatok hazai bajnoki erejéből és a ligák erősségéből jön.
+    models = load_cup_models(league, season_start, selected_day, history)
+else:
+    models = model.build_models(history)
 form = model.team_form(history)
 table = model.build_table(season_history) if not season_history.empty else None
 # Az egymás elleni mérleghez régebbi szezonok is kellenek; itt is csak a kiválasztott nap előtti meccsek.
@@ -402,14 +445,16 @@ round_text = f"{selected_date:%Y.%m.%d.} ({model.WEEKDAYS[selected_date.weekday(
 st.html(
     f'<div class="hero"><div class="hero-title">⚽ {escape(model.LEAGUES[league])} <span>tippek</span></div>'
     f'<div class="hero-sub">{season_start}/{(season_start + 1) % 100:02d}, {escape(round_text)} · '
-    f"{len(fixtures)} meccs · a becslés {len(season_history)} idei és {len(previous)} tavalyi meccsre épül"
+    f"{len(fixtures)} meccs · a becslés {len(season_history)} idei és {len(previous)} korábbi meccsre épül"
+    + (", valamint a csapatok hazai bajnoki teljesítményére, a bajnokságok erőssége szerint" if league in model.EUROPEAN_CUPS else "")
+    + ""
     "</div></div>"
 )
 
 # --- Élő és befejezett meccsek ------------------------------------------------
 
-refresh_column, live_column = st.columns([1, 3], vertical_alignment="center")
-if refresh_column.button("🔄 Frissítés (Élő adatok)"):
+live_column = st.container()
+if refresh_box.button("🔄 Frissítés", help="Az élő adatok azonnali újratöltése", use_container_width=True):
     load_live.clear()
 
 # Meccsenként az állás: {"state": "upcoming" | "live" | "finished", "goals", "corners", "yellows", ...}.
@@ -458,10 +503,47 @@ contexts = {
     name: model.match_context(match, history, table, cups=cups) for name, match in zip(names, fixtures.itertuples())
 }
 
+
+
+def forecast_for(match):
+    """A meccs idejére a stadion városában várható időjárás (lásd model.match_weather), vagy None, ha nem tudható."""
+    city = getattr(match, "city", "")
+    if is_past or not isinstance(city, str) or not city:
+        return None
+    if match.kickoff - pd.Timestamp.now(tz="UTC") > pd.Timedelta(days=model.FORECAST_DAYS):
+        return None
+    try:
+        country = getattr(match, "country", "")
+        place = load_place(city, country if isinstance(country, str) else "")
+        if not place:
+            return None
+        return model.match_weather(load_forecast(round(place[0], 2), round(place[1], 2)), match.kickoff)
+    except (requests.RequestException, ValueError, KeyError):
+        return None
+
+
+# Az időjárás alapból az előrejelzésből jön; a Körülmények fülön átírható.
+forecasts = {name: forecast_for(match) for name, match in zip(names, fixtures.itertuples())}
+for name, forecast in forecasts.items():
+    if forecast:
+        contexts[name]["weather"] = forecast["key"]
+
+if league in model.EUROPEAN_CUPS:
+    # Kupánál csak a kupameccsek ismertek, a csapatok bajnokijai nem, így a pihenőnap nem számolható ki.
+    for context in contexts.values():
+        context["rest"] = (None, None)
+
 with info_tab:
-    squad_box = st.container()  # a hiányzók és kezdők szekciója kerül legfelülre
+    overview_sub, squad_sub, conditions_sub, market_sub = st.tabs(
+        ["📋 Áttekintés", "🩹 Hiányzók és kezdők", "🌦️ Körülmények", "📉 Szorzómozgás"]
+    )
+squad_box = squad_sub.container()
+with conditions_sub:
     st.subheader("Időjárás, pihenőidő, rangadó, új edző")
     st.caption(
+        "Az időjárás a stadion városára szóló előrejelzésből jön a meccs idejére (legfeljebb "
+        f"{model.FORECAST_DAYS} napra előre; esős: legalább {model.number_text(model.RAIN_MM)} mm/óra csapadék), "
+        "de átírható. "
         "A pihenőnapokat és a rangadót a modell magától tölti ki a bajnoki és a nemzetközi kupameccsekből (BL, EL, KL); "
         "írd át, ha más miatt eltér. Kevés pihenő (legfeljebb 4 nap) több kapott és kevesebb rúgott gólt jelent, "
         "a bajnoki utáni 4 napon belüli kupameccs előtt pedig rotációval számol. Új edzőt az első 3 meccsén jelölj."
@@ -470,7 +552,7 @@ with info_tab:
         pd.DataFrame(
             {
                 "Meccs": names,
-                "Időjárás": model.WEATHER["normal"][0],
+                "Időjárás": [model.WEATHER[contexts[name]["weather"]][0] for name in names],
                 "Pihenő – hazai (nap)": [contexts[name]["rest"][0] for name in names],
                 "Pihenő – vendég (nap)": [contexts[name]["rest"][1] for name in names],
                 "Rangadó": [contexts[name]["derby"] for name in names],
@@ -643,15 +725,12 @@ def confirmed_odds(value):
 
 
 def current_odds(key: str):
-    """A kiválasztott irodához megadott szorzó, vagy None, ha nincs megerősített érték.
+    """Az iroda szorzója, vagy None, ha nincs megerősített érték.
 
-    Elsőbbsége az API-ból megérkezett szorzónak van; enélkül a mezőbe írt érték számít, ha pedig a
-    mező ebben a munkamenetben még nem élt, a naplóból az utolsó (így a kezdés előtti utolsó szorzó megmarad).
+    Az API-ból most megérkezett szorzó, ennek híján a naplóból az utolsó (így a kezdés előtti utolsó szorzó megmarad).
     """
     if key in feed:
         return feed[key]
-    if key in st.session_state:
-        return confirmed_odds(st.session_state[key])
     return confirmed_odds(logged(key)[-1][1]) if logged(key) else None
 
 
@@ -684,8 +763,7 @@ if odds_api_key and feed_bookmaker and not is_past:
         odds_status = (
             f"Szorzók: Unibet (The Odds API), frissítve {odds_time:%H:%M} · {len(api_prices)} meccshez érkezett adat"
             + (f" · a havi keretből {quota} kérés maradt" if quota else "")
-            + ". Negyedóránként frissül. Csak az 1X2 és a megérkezett gólvonalak töltődnek be; a többi mező kézzel adható meg."
-            + (" A Tippmixpro oszlopban az Unibet szorzói állnak." if bookmaker == "Tippmixpro" else "")
+            + ". Negyedóránként frissül. Szorzó csak az 1X2-höz és a megérkezett gólvonalakhoz van."
         )
 
 
@@ -721,7 +799,7 @@ def pick_cells(pick: dict, won=None) -> str:
 with tips_tab:
     if odds_status:
         st.caption(odds_status)
-    with st.expander(f"{bookmaker} szorzók megadása és teljes összevetés"):
+    with st.expander(f"{bookmaker} szorzók és teljes összevetés"):
         odds_match = st.selectbox("Meccs", list(details), key="odds-match")
         analysis = details[odds_match][1]
         rows = model.selections(analysis)
@@ -732,28 +810,9 @@ with tips_tab:
         )
         st.caption(f"Várható gólszám: {expected_goals:.2f} → vizsgált gólvonalak: {examined}.")
 
-        result_rows = [row for row in rows if row["group"] == "1X2"]
-        other_rows = [row for row in rows if row["group"] != "1X2"]
-        blocks = [result_rows] + [other_rows[start : start + 4] for start in range(0, len(other_rows), 4)]
-        for block in blocks:
-            for column, row in zip(st.columns(4), block):
-                key = odds_key(odds_match, row)
-                # Az API-ból érkezett szorzó felülírja a mezőt, és nem szerkeszthető; a többi kézzel adható meg.
-                if key in feed or key not in st.session_state:
-                    st.session_state[key] = current_odds(key)
-                column.number_input(
-                    f"{row['market']} – {row['outcome']}",
-                    min_value=1.01,
-                    step=0.01,
-                    format="%.2f",
-                    key=key,
-                    disabled=key in feed,
-                )
-
-        # Minden változást naplóz, így a később átírt szorzóból látszik a piaci mozgás.
+        # Minden változást naplóz, így a később módosult szorzóból látszik a piaci mozgás.
         now, changed = time.time(), False
-        latest = {**{odds_key(odds_match, row): st.session_state.get(odds_key(odds_match, row)) for row in rows}, **feed}
-        for key, value in latest.items():
+        for key, value in feed.items():
             entries = model.record_odds(logged(key), value, now)
             if entries != logged(key):
                 odds_log[key], changed = entries, True
@@ -854,6 +913,16 @@ with stats_tab:
     match, analysis = details[st.selectbox("Meccs", list(details), key="stats-match")]
     markets = analysis["markets"]
     meetings = model.h2h_meetings(h2h, match.home, match.away).tail(model.H2H_MATCHES)
+
+    st.subheader("Játékstílus és párosítás")
+    if analysis["style"] is None:
+        st.caption("Ehhez a meccshez nincs elég adat a csapatok játékstílusáról.")
+    else:
+        st.markdown("\n".join(f"- {line}" for line in analysis["style"]["lines"]))
+        st.caption(
+            "A stílus a csapat labdabirtoklásából és lövésszámából adódik a liga többi csapatához képest "
+            "(felső, középső, alsó harmad); a korábbi meccsek az öt bajnokság 2020/21 óta lejátszott meccsei."
+        )
 
     st.subheader("Várható mutatók")
     expected_rows = []
@@ -1042,13 +1111,72 @@ with news_box:
         "észlelt hiányzókkal számol, a hírek tájékoztató jellegűek."
     )
 
-# --- 3. fül, folytatás: játékvezetők, szorzómozgás, háttértényezők -------------
+# --- 3. fül, folytatás: áttekintő táblázat, módosító tényezők, szorzómozgás -----
 
-with info_tab:
-    st.subheader("Játékvezetők")
-    st.dataframe(pd.DataFrame(referees), hide_index=True)
-    st.caption("A bíró lapátlaga a ligaátlaghoz mérve módosítja a várható sárga lapokat.")
+with overview_sub:
+    weather_names = {key: values[0] for key, values in model.WEATHER.items()}
 
+    def weather_text(name: str, match, context: dict) -> str:
+        """Az időjárás cellája: a kategória az előrejelzéssel; előrejelzés nélkül az, hogy mikortól lesz."""
+        if forecasts[name]:
+            return f"{weather_names[context['weather']]} · {forecasts[name]['text']}"
+        if is_past:
+            return "–"
+        chosen = "" if context["weather"] == "normal" else f"{weather_names[context['weather']]} (kézzel megadva) · "
+        available = match.kickoff - pd.Timedelta(days=model.FORECAST_DAYS - 1)
+        if available > pd.Timestamp.now(tz="UTC"):
+            return f"{chosen}előrejelzés {available:%m.%d.}-től lesz (addig normál idővel számol)"
+        return f"{chosen}az előrejelzés most nem érhető el (normál idővel számol)"
+
+    referee_names = {row["Meccs"]: row["Játékvezető és lapátlaga"] for row in referees}
+    overview = []
+    for name, (match, analysis) in details.items():
+        context = contexts[name]
+        style = analysis["style"]
+        entry = news.get((match.home, match.away), {})
+        cup_games = []
+        for team, schedule in zip((match.home, match.away), context["cup"]):
+            games = [
+                f"{CUP_SHORT.get(schedule[side][1], schedule[side][1])} {schedule[side][0]} nappal {when}"
+                for side, when in (("before", "előtte"), ("after", "utána"))
+                if schedule.get(side)
+            ]
+            if games:
+                cup_games.append(f"{team}: {', '.join(games)}")
+        overview.append(
+            {
+                "Kezdés": "lejátszva" if is_past else kickoff_text(match.kickoff),
+                "Meccs": name,
+                "Stílus (hazai – vendég)": " – ".join(model.STYLE_NAMES[key] for key in style["key"]) if style else "–",
+                "Pihenő (nap)": "–"
+                if all(pd.isna(days) for days in context["rest"])
+                else " – ".join("?" if pd.isna(days) else f"{days:.0f}" for days in context["rest"]),
+                "Hiányzók": f"{len(entry.get('home', []))} – {len(entry.get('away', []))}",
+                "Rangadó": "igen" if context["derby"] else "–",
+                "Kupameccs": "; ".join(cup_games) or "–",
+                "Időjárás": weather_text(name, match, context),
+                "Helyszín": ", ".join(
+                    part for part in (getattr(match, "venue", ""), getattr(match, "city", "")) if isinstance(part, str) and part
+                )
+                or "–",
+                "Játékvezető": referee_names.get(name, "nincs adat"),
+            }
+        )
+    st.dataframe(pd.DataFrame(overview), hide_index=True)
+    st.caption(
+        "Minden meccs egy sorban. Hiányzók: a megadott vagy a kezdőcsapatból észlelt hiányzók száma (hazai – vendég). "
+        "A hiányzókat és a körülményeket a mellette lévő füleken lehet megadni, illetve átírni."
+    )
+
+    st.subheader("Ami a tippeket módosítja")
+    noted = [(name, analysis["notes"]) for name, (_, analysis) in details.items() if analysis["notes"]]
+    for name, notes in noted:
+        with st.container(border=True):
+            st.markdown(f"**{name}**\n\n" + "\n".join(f"- {note}" for note in notes))
+    if not noted:
+        st.caption("Ezen a napon egyik meccsnél sincs olyan tényező, amely az alapbecslést módosítaná.")
+
+with market_sub:
     st.subheader("Szorzók mozgása (Market Drop)")
     moves = []
     for name, (_, analysis) in details.items():
@@ -1076,15 +1204,10 @@ with info_tab:
     if moves:
         st.dataframe(pd.DataFrame(moves), hide_index=True)
     st.caption(
-        f"A mozgást a beírt {bookmaker} szorzókból követi: az elsőként megadott értéket veti össze a mostanival. "
+        f"A mozgást a letöltött {bookmaker} szorzókból követi: az elsőként rögzített értéket veti össze a mostanival. "
         f"Legalább {model.DROP_THRESHOLD:.0%} esés számít dropnak."
-        + ("" if moves else " Ezen a napon még nincs átírt szorzó.")
+        + ("" if moves else " Ezen a napon még nincs megváltozott szorzó.")
     )
-
-    with st.expander("Aktív háttértényezők meccsenként"):
-        for name, (_, analysis) in details.items():
-            if analysis["notes"]:
-                st.markdown(f"**{name}**\n\n" + "\n".join(f"- {note}" for note in analysis["notes"]))
 
 # --- 4. fül: hírek és friss fejlemények ----------------------------------------
 
@@ -1095,9 +1218,28 @@ with news_tab:
         "témába; a „Várható hatás” a téma alapján készül, nem a cikk szövegének értelmezéséből."
         + (" Lejátszott napnál is a mostani híreket mutatja." if is_past else "")
     )
-    view = st.radio("Nézet", ["Meccsenként", "A liga összes friss híre"], horizontal=True, label_visibility="collapsed")
+    view = st.radio(
+        "Nézet", ["Csapatonként", "Meccsenként", "A liga összes friss híre"], horizontal=True, label_visibility="collapsed"
+    )
 
-    if view == "Meccsenként":
+    if view == "Csapatonként":
+        league_teams = sorted(set(season["home"]) | set(season["away"]))
+        news_team = st.selectbox("Csapat", league_teams, key=f"news-team-{league}")
+        marks = {item["link"]: item for item in tagged}
+        found = model.team_articles(articles, news_team)
+        if found:
+            st.caption(f"{news_team}: {len(found)} cikk az elmúlt {model.NEWS_MAX_AGE_DAYS} napból, a legújabbtól.")
+            st.markdown(
+                "\n".join(
+                    crumb({**item, "categories": marks[item["link"]]["categories"] if item["link"] in marks else []})
+                    for item in found
+                )
+            )
+        elif articles:
+            st.info(f"{news_team}: az elmúlt {model.NEWS_MAX_AGE_DAYS} napban nem jelent meg róla cikk a figyelt forrásokban.")
+        else:
+            st.info("A hírforrások most nem érhetők el.")
+    elif view == "Meccsenként":
         shown = 0
         for name, (match, analysis) in details.items():
             items = [item for item in tagged if {match.home, match.away} & set(item["teams"])][:6]

@@ -53,8 +53,21 @@ def load_raw(league: str, start_year: int) -> pd.DataFrame:
     return raw
 
 
+def load_possession(league: str, start_year: int, teams: list) -> pd.DataFrame:
+    """A szezon meccseinek labdabirtoklása; a lezárt szezonokat a .cache mappából veszi, ha már megvan."""
+    path = CACHE_DIR / f"possession_{league}_{model.season_code(start_year)}.csv"
+    if path.exists() and start_year < model.current_season_start():
+        return pd.read_csv(path)
+    possession = model.fetch_possession(league, start_year, teams)
+    CACHE_DIR.mkdir(exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    possession.to_csv(temporary, index=False)
+    temporary.replace(path)
+    return possession
+
+
 def load_season(league: str, start_year: int) -> pd.DataFrame:
-    """Egy szezon lejátszott meccsei a modell oszlopaival és a piac esélyeivel (market_1 / X / 2 / over)."""
+    """Egy szezon lejátszott meccsei a modell oszlopaival, labdabirtoklással és a piac esélyeivel (market_1 / X / 2 / over)."""
     raw = load_raw(league, start_year)
     matches = model.parse_matches(raw)
     odds = raw.loc[matches.index]
@@ -72,6 +85,8 @@ def load_season(league: str, start_year: int) -> pd.DataFrame:
 
     matches[["market_1", "market_X", "market_2"]] = implied(ODDS_1X2)
     matches[["market_over", "market_under"]] = implied(ODDS_TOTAL)
+    teams = sorted(set(matches["home"]) | set(matches["away"]))
+    matches = model.add_possession(matches, load_possession(league, start_year, teams))
     return matches.sort_values("date", kind="stable").reset_index(drop=True)
 
 
@@ -92,7 +107,12 @@ def backtest_season(task: tuple) -> list:
     for day, todays in current.groupby("date", sort=True):
         played = current[current["date"] < day]
         history = pd.concat([previous.assign(weight=model.PREV_SEASON_WEIGHT), played.assign(weight=1.0)], ignore_index=True)
-        models = model.build_models(history)
+        # A rangadós (kisebb formasúlyú) modellek csak rangadós napon kellenek; így a mérés közel kétszer gyorsabb.
+        with_xg = model.add_xg(history)
+        models = {stat: model.stat_model(with_xg, stat) for stat in (*model.STATS, "xg")}
+        models["styles"] = model.team_styles(history)
+        if any(model.is_derby(home, away) for home, away in zip(todays["home"], todays["away"])):
+            models["derby"] = model.build_models(history)["derby"]
         table = model.build_table(played) if not played.empty else None
         h2h = pd.concat([*older, previous, played], ignore_index=True)
         games = pd.concat([played["home"], played["away"]]).value_counts()
@@ -114,6 +134,14 @@ def backtest_season(task: tuple) -> list:
                 "exp_away_goals": away_goals,
                 "exp_corners": sum(markets[3]["values"]),
                 "exp_yellows": sum(markets[4]["values"]),
+                # A ligaátlag felé húzás és a stíluskorrekció előtti értékek, valamint a stíluspár: ezekből illeszthetők az állandók.
+                "raw_goals": sum(analysis["raw"]["goals"]),
+                "raw_corners": sum(analysis["raw"]["corners"]),
+                "raw_yellows": sum(analysis["raw"]["yellows"]),
+                "league_goals": models["goals"]["home_avg"] + models["goals"]["away_avg"],
+                "league_corners": models["corners"]["home_avg"] + models["corners"]["away_avg"] if models["corners"] else NAN,
+                "league_yellows": models["yellows"]["home_avg"] + models["yellows"]["away_avg"] if models["yellows"] else NAN,
+                "style": "-".join(analysis["style"]["key"]) if analysis["style"] else "",
                 "home_goals": match.home_goals,
                 "away_goals": match.away_goals,
                 "corners": match.home_corners + match.away_corners,
@@ -236,7 +264,7 @@ def parse_overrides(items: list) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="A tippmodell visszamérése lejátszott meccseken")
-    parser.add_argument("--league", action="append", choices=sorted(model.LEAGUES), help="bajnokság (többször is megadható)")
+    parser.add_argument("--league", action="append", choices=sorted(set(model.LEAGUES) - model.EUROPEAN_CUPS), help="bajnokság (többször is megadható)")
     parser.add_argument("--from", dest="first", type=int, help="az első visszamért szezon kezdőéve")
     parser.add_argument("--to", dest="last", type=int, help="az utolsó visszamért szezon kezdőéve")
     parser.add_argument("--set", action="append", metavar="NÉV=ÉRTÉK", help="a modell egy állandójának felülírása")
@@ -245,7 +273,10 @@ def main() -> int:
 
     last = args.last or model.current_season_start()
     first = args.first or last - TEST_SEASONS
-    results = run(args.league or sorted(model.LEAGUES), list(range(first, last + 1)), parse_overrides(args.set))
+    overrides = parse_overrides(args.set)
+    for name, value in overrides.items():  # a kiértékelés (például a határok) ugyanazzal a beállítással számoljon
+        setattr(model, name, value)
+    results = run(args.league or sorted(set(model.LEAGUES) - model.EUROPEAN_CUPS), list(range(first, last + 1)), overrides)
     if results.empty:
         print("Nincs visszamérhető meccs.", file=sys.stderr)
         return 1
