@@ -6,8 +6,8 @@ eredménnyel és a fogadóirodák átlagszorzóiból számolt esélyekkel.
 
 Amit nem lát: hiányzók, kezdőcsapatok, időjárás, nemzetközi kupameccsek és
 edzőváltás – ezekről nincs múltbeli adat, ezért a visszamérés az alapmodellt
-(átlagok, forma, xG, egymás elleni meccsek, pihenőnap, motiváció, rangadó,
-játékvezető) minősíti.
+(csapaterő a korábbi meccsek szorzóiból, gólokból és xG-ből, átlagok, forma,
+egymás elleni meccsek, pihenőnap, motiváció, rangadó, játékvezető) minősíti.
 
 Használat:
     python backtest.py                       # öt bajnokság, az utolsó öt lezárt szezon és az idei
@@ -32,9 +32,6 @@ import main as model
 
 CACHE_DIR = Path(__file__).with_name(".cache")
 TEST_SEASONS = 5  # ennyi lezárt szezont mér vissza az idei mellett
-# A fogadóirodák átlagszorzói a forrásfájlban, elsőbbségi sorrendben (a régebbi szezonok más oszlopnevet használnak).
-ODDS_1X2 = [("AvgH", "AvgD", "AvgA"), ("BbAvH", "BbAvD", "BbAvA"), ("B365H", "B365D", "B365A")]
-ODDS_TOTAL = [("Avg>2.5", "Avg<2.5"), ("BbAv>2.5", "BbAv<2.5"), ("B365>2.5", "B365<2.5")]
 BUCKETS = (0.5, 0.6, 0.7, 0.8, 1.01)  # a tippek esélysávjai a találati arányhoz
 NAN = float("nan")
 
@@ -71,20 +68,8 @@ def load_season(league: str, start_year: int) -> pd.DataFrame:
     raw = load_raw(league, start_year)
     matches = model.parse_matches(raw)
     odds = raw.loc[matches.index]
-
-    def implied(groups: list) -> pd.DataFrame:
-        """Az első meglévő oszlopcsoport szorzóiból az árrés nélküli esélyek."""
-        result = pd.DataFrame(NAN, index=matches.index, columns=range(len(groups[0])))
-        for columns in groups:
-            if not set(columns) <= set(odds.columns):
-                continue
-            inverse = 1 / odds[list(columns)].apply(pd.to_numeric, errors="coerce")
-            inverse.columns = result.columns
-            result = result.fillna(inverse.div(inverse.sum(axis=1, skipna=False), axis=0))
-        return result
-
-    matches[["market_1", "market_X", "market_2"]] = implied(ODDS_1X2)
-    matches[["market_over", "market_under"]] = implied(ODDS_TOTAL)
+    matches[["market_1", "market_X", "market_2"]] = model.market_probabilities(odds, model.ODDS_1X2)
+    matches[["market_over", "market_under"]] = model.market_probabilities(odds, model.ODDS_TOTAL)
     teams = sorted(set(matches["home"]) | set(matches["away"]))
     matches = model.add_possession(matches, load_possession(league, start_year, teams))
     return matches.sort_values("date", kind="stable").reset_index(drop=True)
@@ -110,6 +95,7 @@ def backtest_season(task: tuple) -> list:
         # A rangadós (kisebb formasúlyú) modellek csak rangadós napon kellenek; így a mérés közel kétszer gyorsabb.
         with_xg = model.add_xg(history)
         models = {stat: model.stat_model(with_xg, stat) for stat in (*model.STATS, "xg")}
+        models["rating"] = model.rating_model(with_xg)
         models["styles"] = model.team_styles(history)
         if any(model.is_derby(home, away) for home, away in zip(todays["home"], todays["away"])):
             models["derby"] = model.build_models(history)["derby"]
@@ -136,6 +122,13 @@ def backtest_season(task: tuple) -> list:
                 "exp_yellows": sum(markets[4]["values"]),
                 # A ligaátlag felé húzás és a stíluskorrekció előtti értékek, valamint a stíluspár: ezekből illeszthetők az állandók.
                 "raw_goals": sum(analysis["raw"]["goals"]),
+                "raw_home_goals": analysis["raw"]["goals"][0],
+                "raw_away_goals": analysis["raw"]["goals"][1],
+                # Az egymás elleni meccsek beszámítása előtti várható gólok (a H2H súlyának illesztéséhez).
+                "base_home_goals": analysis["before_h2h"]["goals"][0],
+                "base_away_goals": analysis["before_h2h"]["goals"][1],
+                "base_corners": sum(analysis["before_h2h"]["corners"]),
+                "base_yellows": sum(analysis["before_h2h"]["yellows"]),
                 "raw_corners": sum(analysis["raw"]["corners"]),
                 "raw_yellows": sum(analysis["raw"]["yellows"]),
                 "league_goals": models["goals"]["home_avg"] + models["goals"]["away_avg"],

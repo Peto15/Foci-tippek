@@ -779,8 +779,8 @@ if odds_api_key and feed_bookmaker and not is_past:
 def top_picks(match_name: str, analysis: dict, count: int = 3) -> list:
     """A meccs legvalószínűbb tippjei, piaccsoportonként legfeljebb egy.
 
-    Kizárólag a modell esélye dönt (a csapatok statisztikái, formája, xG-je és a
-    meccs körülményei alapján); a szorzó csak kiegészítő adatként kerül a tipp mellé.
+    Kizárólag a modell esélye dönt (a csapatok ereje, statisztikái, formája és a
+    meccs körülményei alapján); a megtippelt meccs szorzója csak kiegészítő adatként kerül a tipp mellé.
     """
     best = {}
     for row in model.selections(analysis):
@@ -894,8 +894,8 @@ with tips_tab:
                 f'<div class="match-grid">{"".join(sections[state])}</div>'
             )
     st.caption(
-        f"Meccsenként a 3 legvalószínűbb tipp, piaconként egy – kizárólag a modell esélye alapján (statisztikák, "
-        f"forma, xG, hiányzók, körülmények). Zöld a {model.RECOMMENDED:.0%} feletti esély. A {bookmaker} oszlop csak "
+        f"Meccsenként a 3 legvalószínűbb tipp, piaconként egy – kizárólag a modell esélye alapján (csapaterő, "
+        f"statisztikák, forma, hiányzók, körülmények). Zöld a {model.RECOMMENDED:.0%} feletti esély. A {bookmaker} oszlop csak "
         f"tájékoztató szorzó, a tippek kiválasztásába nem számít bele. Magas kockázat: valamelyik csapatnál több mint "
         f"{model.RISK_ABSENCES} alapember hiányzik. "
         f"Befejezett meccsnél ✓ = a tipp nyert, ✗ = vesztett."
@@ -1305,9 +1305,10 @@ with news_tab:
         st.caption(f"Most nem elérhető forrás: {', '.join(failed)}.")
 
 st.caption(
-    f"Statisztikai becslés, nem garancia. Az esélyekben az utolsó {model.H2H_MATCHES} egymás elleni meccs "
-    f"legfeljebb {model.H2H_WEIGHT:.0%} súllyal számít; a gólokba a lövésekből becsült xG, a tabellahelyzet, "
-    f"a pihenőnapok és az időjárás, a lapokba a rangadó és az időjárás is beleszámít. "
+    f"Statisztikai becslés, nem garancia. A gólokhoz a csapatok erejét a korábbi meccseik szorzóiból, góljaiból és "
+    f"a lövésekből becsült xG-ből számolja (a friss meccsek többet számítanak), amit a tabellahelyzet, a pihenőnapok "
+    f"és az időjárás módosít; a szögletekbe és a lapokba az utolsó {model.H2H_MATCHES} egymás elleni meccs legfeljebb "
+    f"{model.H2H_WEIGHT:.0%} súllyal, a lapokba a rangadó és az időjárás is beleszámít. "
     f"A hiányzók és a többi tényező hatása becsült szorzókkal számol (lásd a main.py elejét)."
 )
 

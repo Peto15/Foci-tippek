@@ -6,9 +6,10 @@ szorzókat (fetch_odds; kulcs: ODDS_API_KEY) a webes felület használja.
 A becslés a csapatok meccsenkénti átlagaiból (gól, szöglet, sárga lap) és az
 utolsó meccsek formájából számolt várható értékekre épülő Poisson-modell,
 amelyet a két csapat legutóbbi egymás elleni meccsei (H2H), a hiányzó
-játékosok és a játékvezető lapátlaga módosít. A gólokhoz a lövésekből becsült
-xG / xGA nagyobb súllyal számít, mint a tényleges gólok; a forma külön hazai
-és vendég szerepre készül. További tényezők: kulcsemberek hiánya, tabellahelyzet
+játékosok és a játékvezető lapátlaga módosít. A gólokhoz a csapatok erejét a
+korábbi meccseik szorzóiból visszafejtett várható gólokból, a tényleges
+gólokból és a lövésekből becsült xG-ből számolja (rating_model), a friss
+meccseket nagyobb súllyal. További tényezők: kulcsemberek hiánya, tabellahelyzet
 (motiváció), helyi rangadó, pihenőnapok, nemzetközi kupameccsek, új edző és
 időjárás. A várható
 gólszámhoz illő gólvonalakat (1,5 / 2,5 / 3,5) is megvizsgálja, és a 70%
@@ -34,6 +35,7 @@ import sys
 import textwrap
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import xml.etree.ElementTree as ElementTree
 from datetime import date
 from difflib import SequenceMatcher
@@ -46,7 +48,7 @@ import requests
 
 # --- The Odds API (the-odds-api.com): automatikus szorzók -------------------------
 # A kulcs a projektmappa .env fájljában van (ODDS_API_KEY=...); a környezeti változó és az
-# alábbi sor is megfelel, a webes felületen pedig az oldalsáv kulcsmezője felülírhatja.
+# alábbi sor is megfelel.
 ENV_FILE = Path(__file__).with_name(".env")
 ODDS_API_KEY = ""
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/{sport}/odds"
@@ -77,8 +79,8 @@ LEAGUES = {
     "F1": "Ligue 1",
     "CL": "Bajnokok Ligája",
 }
-# Nemzetközi kupák: a football-data.co.uk-n nincsenek meg, ezért a meccsadataik is az ESPN-ről jönnek, és a
-# becslés csak a kupában játszott meccsekre épül (a csapatok hazai bajnoki meccseit nem látja).
+# Nemzetközi kupák: a football-data.co.uk-n nincsenek meg, ezért a meccsadataik az ESPN-ről jönnek; a gól és
+# a szöglet becslése a csapatok hazai bajnoki erejére épül (lásd CUP_MODEL), a többi a kupameccsekre.
 EUROPEAN_CUPS = {"CL"}
 EUROPEAN_FROM_MONTH = 9  # a főtábla szeptemberben indul; a nyári selejtezők kimaradnak
 # A kupacsapatok hazai bajnokságai a football-data.co.uk-n (teljes statisztikával), és a csoportjuk a ligaerősséghez.
@@ -114,6 +116,20 @@ SHOT_COLUMNS = {
 XG_WEIGHT = 0.65  # a várható gólban ennyit számít az xG-alapú becslés a tényleges gólok mellett
 XG_MIN_ROWS = 50  # ennél kevesebb lövésadatos csapatmeccsből nem becsül xG-t
 XG_FALLBACK = (0.30, 0.03)  # gól / kaput eltaláló, illetve mellé menő lövés, ha az illesztés értelmetlen
+
+# A fogadóirodák átlagszorzói a forrásfájlban, elsőbbségi sorrendben (a régebbi szezonok más oszlopnevet használnak).
+ODDS_1X2 = [("AvgH", "AvgD", "AvgA"), ("BbAvH", "BbAvD", "BbAvA"), ("B365H", "B365D", "B365A")]
+ODDS_TOTAL = [("Avg>2.5", "Avg<2.5"), ("BbAv>2.5", "BbAv<2.5"), ("B365>2.5", "B365<2.5")]
+# Csapaterő a gólokhoz (rating_model): a csapatok korábbi meccseinek szorzóiból visszafejtett várható gólok a
+# legjobb erőmérők, mert a piac a hiányzókat és a keret erejét is beárazta. Csak a már lejátszott meccsek
+# szorzóit használja, a megtippelt meccsét nem. A visszamérésből illesztett értékek.
+RATING_MARKET = 0.8  # a célértékben ennyit számít a szorzókból visszafejtett várható gól (a többi: gól és xG)
+RATING_HALF_LIFE = 150  # ennyi nap alatt feleződik egy régebbi meccs súlya
+RATING_PRIOR = 1.0  # ennyi "átlagos" meccsel húzza az átlag felé a csapaterőt
+RATING_NEW_TEAM = (0.8, 1.2)  # az újonc (az előző szezonban nem szereplő) csapat kiinduló (támadó, kapott) ereje
+RATING_STRETCH = 1.15  # a két csapat várható góljának arányát ennyivel a hatványra emeli (az esélyest alábecsülné)
+RATING_MIN_SHARE = 0.5  # a meccsek legalább ekkora hányadához kell szorzó, különben a régi (gól + xG) becslés marad
+IMPLIED_TOTAL = 2.7  # a visszafejtésnél ennyi az össz-gól, ha a meccshez nincs gólszám-szorzó
 
 VENUE_FORM_SHARE = 0.6  # a formán belül ennyit számít a pályán (hazai, illetve vendégként) mutatott forma
 FORM_MATCHES = 5  # ennyi utolsó meccs számít formának
@@ -198,6 +214,7 @@ STYLE_EFFECT = {
 }
 # A csapatok közti különbségből ennyi marad a várható értékben (1 = a mért átlagok változatlanul): a szöglet- és
 # lapátlagok nagy részben a véletlent tükrözik, ezért a ligaátlag felé húzza őket. A visszamérésből illesztve.
+# A gólokra csak akkor vonatkozik, ha nincs csapaterő-modell (rating_model), mert az már jól kalibrált.
 SPREAD = {"goals": 0.6, "corners": 0.4, "yellows": 0.6}
 # A szóródás a Poisson-eloszláséhoz képest (1 = Poisson): a szögletek és a lapok ennél jobban szórnak.
 DISPERSION = {"corners": 1.15, "yellows": 1.1}
@@ -376,8 +393,6 @@ SQUAD_NEWS = ("sérülés", "eltiltás", "kezdőcsapat")  # a hiányzókat és k
 USUAL_STARTS = 3  # aki a csapat utolsó meccsei közül legalább ennyin kezdett, az szokásos kezdő
 USUAL_MIN_GAMES = 3  # ennél kevesebb ismert kezdőcsapatból nem állapít meg szokásos kezdőt
 
-BOOKMAKERS = ["Tippmixpro", "Bet365", "Unibet", "Bwin", "William Hill", "Pinnacle"]  # az első az alapértelmezett
-
 # Egy hiányzó kulcsjátékos hatása pozíció szerint: (rúgott gól, kapott gól, saját
 # sárga lap) szorzójának változása. Becsült értékek, nem mért adatból származnak.
 ABSENCE_IMPACT = {
@@ -428,11 +443,19 @@ def fetch_matches(league: str, season: str) -> pd.DataFrame:
     return parse_matches(download_csv(DATA_URL.format(season=season, league=league)))
 
 
+def parse_dates(dates: pd.Series) -> pd.Series:
+    """A forrásfájl nap/hónap/év dátumai; a régebbi szezonok fájljaiban az év kétjegyű."""
+    text = dates.astype("string").str.strip()
+    return pd.to_datetime(text, format="%d/%m/%Y", errors="coerce").fillna(
+        pd.to_datetime(text, format="%d/%m/%y", errors="coerce")
+    )
+
+
 def parse_matches(raw: pd.DataFrame) -> pd.DataFrame:
     """A forrásfájl soraiból a lejátszott meccsek a modell oszlopneveivel; a sorok indexe a forrásé marad."""
     matches = pd.DataFrame(
         {
-            "date": pd.to_datetime(raw["Date"], dayfirst=True),
+            "date": parse_dates(raw["Date"]),
             "home": raw["HomeTeam"],
             "away": raw["AwayTeam"],
         }
@@ -443,7 +466,66 @@ def parse_matches(raw: pd.DataFrame) -> pd.DataFrame:
         matches[f"home_{stat}"] = raw.get(home_column, NAN)
         matches[f"away_{stat}"] = raw.get(away_column, NAN)
     matches = matches.dropna(subset=["home_goals", "away_goals"])
+    # A meccs előtti szorzókból visszafejtett várható gólok (home_implied / away_implied) a csapaterőhöz.
+    result = market_probabilities(raw.loc[matches.index], ODDS_1X2)
+    total = market_probabilities(raw.loc[matches.index], ODDS_TOTAL)
+    matches["home_implied"], matches["away_implied"] = implied_goals(
+        result[0].to_numpy(), result[2].to_numpy(), total[0].to_numpy()
+    )
     return matches.astype({"home_goals": int, "away_goals": int})
+
+
+def market_probabilities(raw: pd.DataFrame, groups: list) -> pd.DataFrame:
+    """Az első meglévő oszlopcsoport szorzóiból az árrés nélküli esélyek (oszlopok: 0, 1, ...); szorzó nélkül NaN."""
+    result = pd.DataFrame(NAN, index=raw.index, columns=range(len(groups[0])))
+    for columns in groups:
+        if not set(columns) <= set(raw.columns):
+            continue
+        inverse = 1 / raw[list(columns)].apply(pd.to_numeric, errors="coerce")
+        inverse.columns = result.columns
+        result = result.fillna(inverse.div(inverse.sum(axis=1, skipna=False), axis=0))
+    return result
+
+
+def poisson_grid(home_goals: np.ndarray, away_goals: np.ndarray) -> np.ndarray:
+    """Az eredmények esélye (meccs × hazai gól × vendég gól) független Poisson-eloszlásokkal."""
+    counts = np.arange(MAX_GOALS + 1)
+    factorials = np.array([math.lgamma(count + 1) for count in counts])
+    home = np.exp(-home_goals[:, None] + counts * np.log(home_goals[:, None]) - factorials)
+    away = np.exp(-away_goals[:, None] + counts * np.log(away_goals[:, None]) - factorials)
+    return home[:, :, None] * away[:, None, :]
+
+
+@lru_cache(maxsize=1)
+def implied_table() -> tuple:
+    """Táblázat a szorzók visszafejtéséhez: össz-gól és hazai rész -> P(hazai) − P(vendég), illetve P(2,5 gól felett)."""
+    totals = np.arange(1.2, 5.01, 0.02)
+    shares = np.arange(0.08, 0.921, 0.004)
+    total, share = np.meshgrid(totals, shares, indexing="ij")
+    grid = poisson_grid((total * share).ravel(), (total * (1 - share)).ravel())
+    home = np.tril(grid, -1).sum(axis=(1, 2))
+    away = np.triu(grid, 1).sum(axis=(1, 2))
+    goals = np.add.outer(np.arange(MAX_GOALS + 1), np.arange(MAX_GOALS + 1))
+    over = grid[:, goals > GOAL_LINE].sum(axis=1)
+    return totals, shares, (home - away).reshape(total.shape), over.reshape(total.shape)
+
+
+def implied_goals(p_home: np.ndarray, p_away: np.ndarray, p_over: np.ndarray) -> tuple:
+    """A szorzók esélyeiből visszafejtett várható gólok: (hazai, vendég) tömb; 1X2-szorzó nélkül NaN.
+
+    Azt a várható gólpárt keresi, amellyel a Poisson-modell a piac hazai–vendég esélykülönbségét és a
+    2,5 gól feletti esélyét adja. Gólszám-szorzó nélkül az össz-gól IMPLIED_TOTAL.
+    """
+    totals, shares, difference, over = implied_table()
+    known = ~(np.isnan(p_home) | np.isnan(p_away))
+    gap = np.where(known, p_home - p_away, 0.0)
+    total_index = np.full(len(gap), int(np.searchsorted(totals, IMPLIED_TOTAL)))
+    for _ in range(4):
+        share_index = np.clip((difference[total_index] < gap[:, None]).sum(axis=1), 0, len(shares) - 1)
+        found = np.clip((over[:, share_index].T < p_over[:, None]).sum(axis=1), 0, len(totals) - 1)
+        total_index = np.where(np.isnan(p_over), total_index, found)
+    total, share = totals[total_index], shares[share_index]
+    return np.where(known, total * share, NAN), np.where(known, total * (1 - share), NAN)
 
 
 def espn_months(league: str, months) -> list:
@@ -874,14 +956,85 @@ def expected(model, home: str, away: str) -> tuple:
     if model is None:
         return NAN, NAN
     teams = model["teams"]
+    own_default, opponent_default = model.get("new_team", (1.0, 1.0))  # akiről még nincs adat
     return (
         model["home_avg"]
-        * teams["own_strength_home"].get(home, 1.0)
-        * teams["opponent_strength_away"].get(away, 1.0),
+        * teams["own_strength_home"].get(home, own_default)
+        * teams["opponent_strength_away"].get(away, opponent_default),
         model["away_avg"]
-        * teams["own_strength_away"].get(away, 1.0)
-        * teams["opponent_strength_home"].get(home, 1.0),
+        * teams["own_strength_away"].get(away, own_default)
+        * teams["opponent_strength_home"].get(home, opponent_default),
     )
+
+
+def rating_model(history: pd.DataFrame):
+    """A gólok csapaterő-modellje a stat_model alakjában, vagy None, ha a meccsekhez nincs elég szorzó.
+
+    Minden csapatnak egy támadó- és egy kapott-ereje van; a várható gól a ligaátlag × a csapat támadóereje ×
+    az ellenfél kapott-ereje, így az ellenfelek erőssége is beleszámít. Az erőket a korábbi meccsek
+    célértékére illeszti: a meccs előtti szorzókból visszafejtett várható gól (RATING_MARKET súllyal), a
+    többi a tényleges gól és az xG keveréke. A friss meccsek többet számítanak (RATING_HALF_LIFE), az
+    újonc csapat RATING_NEW_TEAM erőről indul. A history-ban a "weight" oszlop csak az újoncok
+    felismeréséhez kell: akinek nincs 1-nél kisebb súlyú (előző szezonbeli) meccse, az újonc.
+    """
+    if "home_implied" not in history.columns or history.empty:
+        return None
+    played = history if "home_xg" in history.columns else add_xg(history)
+    if played["home_implied"].notna().mean() < RATING_MIN_SHARE:
+        return None
+    targets = {}
+    for side in ("home", "away"):
+        goals = played[f"{side}_goals"].astype(float)
+        own = (1 - XG_WEIGHT) * goals + XG_WEIGHT * played[f"{side}_xg"].fillna(goals)
+        targets[side] = ((1 - RATING_MARKET) * own + RATING_MARKET * played[f"{side}_implied"].fillna(own)).to_numpy(float)
+    names = sorted(set(played["home"]) | set(played["away"]))
+    index = {team: number for number, team in enumerate(names)}
+    home = played["home"].map(index).to_numpy()
+    away = played["away"].map(index).to_numpy()
+    age = (played["date"].max() - played["date"]).dt.days.to_numpy()
+    weight = 0.5 ** (age / RATING_HALF_LIFE)
+
+    earlier = played[played["weight"] < 1]
+    veterans = set(earlier["home"]) | set(earlier["away"])
+    prior_attack, prior_concede = np.ones(len(names)), np.ones(len(names))
+    if veterans:
+        newcomers = [index[team] for team in names if team not in veterans]
+        prior_attack[newcomers], prior_concede[newcomers] = RATING_NEW_TEAM
+
+    count = len(names)
+    attack, concede = np.ones(count), np.ones(count)
+    away_avg = (weight * targets["away"]).sum() / weight.sum()
+    venue = (weight * targets["home"]).sum() / (weight * targets["away"]).sum()
+    prior = RATING_PRIOR * (weight * (targets["home"] + targets["away"])).sum() / (2 * weight.sum())
+    for _ in range(25):  # felváltva illeszti a támadó- és a kapott-erőt, majd a ligaátlagot és a hazai pálya előnyét
+        scored = np.bincount(home, weight * targets["home"], count) + np.bincount(away, weight * targets["away"], count)
+        chances = np.bincount(home, weight * away_avg * venue * concede[away], count) + np.bincount(
+            away, weight * away_avg * concede[home], count
+        )
+        attack = (scored + prior * prior_attack) / (chances + prior)
+        let_in = np.bincount(away, weight * targets["home"], count) + np.bincount(home, weight * targets["away"], count)
+        chances = np.bincount(away, weight * away_avg * venue * attack[home], count) + np.bincount(
+            home, weight * away_avg * attack[away], count
+        )
+        concede = (let_in + prior * prior_concede) / (chances + prior)
+        away_avg = (weight * (targets["home"] + targets["away"])).sum() / (
+            weight * (venue * attack[home] * concede[away] + attack[away] * concede[home])
+        ).sum()
+        venue = (weight * targets["home"]).sum() / (weight * away_avg * attack[home] * concede[away]).sum()
+
+    middle = away_avg * (1 + venue) / 2
+    teams = pd.DataFrame(
+        {
+            "own_avg": middle * attack,
+            "opponent_avg": middle * concede,
+            "own_strength_home": attack,
+            "own_strength_away": attack,
+            "opponent_strength_home": concede,
+            "opponent_strength_away": concede,
+        },
+        index=names,
+    )
+    return {"teams": teams, "home_avg": away_avg * venue, "away_avg": away_avg, "new_team": RATING_NEW_TEAM}
 
 
 def plain_name(name: str) -> str:
@@ -1507,6 +1660,8 @@ def build_models(history: pd.DataFrame) -> dict:
     stats = (*STATS, "xg")
     models = {stat: stat_model(history, stat) for stat in stats}
     models["derby"] = {stat: stat_model(history, stat, FORM_WEIGHT * DERBY_FORM_SHARE) for stat in stats}
+    # A gólok csapaterő-modellje a friss meccseket magától súlyozza, ezért rangadón is ugyanaz.
+    models["rating"] = models["derby"]["rating"] = rating_model(history)
     models["styles"] = team_styles(history)
     return models
 
@@ -1808,8 +1963,8 @@ def h2h_meetings(matches: pd.DataFrame, home: str, away: str) -> pd.DataFrame:
     ].sort_values("date", kind="stable")
 
 
-def apply_h2h(values: dict, models: dict, matches: pd.DataFrame, home: str, away: str) -> dict:
-    """A várható értékeket a két csapat utolsó H2H_MATCHES egymás elleni meccsének átlaga felé húzza.
+def apply_h2h(values: dict, models: dict, matches: pd.DataFrame, home: str, away: str, stats=tuple(STATS)) -> dict:
+    """A megadott statisztikák várható értékét a két csapat utolsó H2H_MATCHES egymás elleni meccsének átlaga felé húzza.
 
     A súly a meglévő meccsek arányában nő H2H_WEIGHT-ig, így egy-két találkozó
     csak keveset számít. A fordított pályaválasztású meccsek értékeit a liga
@@ -1817,7 +1972,7 @@ def apply_h2h(values: dict, models: dict, matches: pd.DataFrame, home: str, away
     """
     pair = h2h_meetings(matches, home, away)
     blended = dict(values)
-    for stat in STATS:
+    for stat in stats:
         model = models[stat]
         meetings = pair.dropna(subset=[f"home_{stat}", f"away_{stat}"]).tail(H2H_MATCHES)
         if model is None or meetings.empty or not model["away_avg"] or not model["home_avg"]:
@@ -2064,8 +2219,9 @@ def analyse(
 ) -> dict:
     """Egy meccs piacai minden tényezővel módosítva, plusz a megjegyzések.
 
-    A várható gól a gól- és az xG-modell keveréke (az xG nagyobb súllyal), amit az
-    egymás elleni meccsek (a h2h táblából, ennek híján a history-ból) finomítanak.
+    A várható gól a csapaterő-modellből jön (rating_model); ennek híján a gól- és az xG-modell
+    keveréke (az xG nagyobb súllyal). A szögletet és a lapot – csapaterő-modell nélkül a gólt is – az
+    egymás elleni meccsek (a h2h táblából, ennek híján a history-ból) finomítják.
     Erre jönnek a szorzók: hiányzók, játékvezető, és a context-ből (lásd
     match_context) az időjárás, a rangadó, a pihenőnapok, a közeli kupameccs, az
     új edző és a motiváció. Rangadón a forma kisebb súlyú modelljei számolnak.
@@ -2077,13 +2233,22 @@ def analyse(
     if derby and "derby" in models:
         models = models["derby"]
     base = {stat: expected(models[stat], home, away) for stat in STATS}
-    if models.get("xg") is not None:
+    rated = models.get("rating") is not None
+    if rated:
+        # A csapaterő-modell várható góljai; az arányukat RATING_STRETCH széthúzza, az összegük marad.
+        home_goals, away_goals = expected(models["rating"], home, away)
+        ratio = (home_goals / away_goals) ** RATING_STRETCH
+        base["goals"] = ((home_goals + away_goals) * ratio / (1 + ratio), (home_goals + away_goals) / (1 + ratio))
+    elif models.get("xg") is not None:
         chances = expected(models["xg"], home, away)
         if not any(math.isnan(value) for value in chances):
             base["goals"] = tuple(
                 (1 - XG_WEIGHT) * goals + XG_WEIGHT * chance for goals, chance in zip(base["goals"], chances)
             )
-    base = apply_h2h(base, models, history if h2h is None else h2h, home, away)
+    before_h2h = dict(base)
+    # A csapaterő-modell góljain az egymás elleni meccsek a visszamérés szerint csak rontanak, ezért ott kimaradnak.
+    h2h_stats = tuple(stat for stat in STATS if not (rated and stat == "goals"))
+    base = apply_h2h(base, models, history if h2h is None else h2h, home, away, h2h_stats)
     # A csapatok közti különbséget a ligaátlag felé húzza (SPREAD), majd jön a párosítás stílusából adódó
     # korrekció: amit két ilyen jellegű csapat meccse a puszta átlagokhoz képest hozni szokott.
     raw = dict(base)
@@ -2093,7 +2258,7 @@ def analyse(
         if models[stat] is None or math.isnan(total) or total <= 0:
             continue
         league_total = models[stat]["home_avg"] + models[stat]["away_avg"]
-        spread = 1.0 if models[stat].get("calibrated") else SPREAD[stat]
+        spread = 1.0 if models[stat].get("calibrated") or (rated and stat == "goals") else SPREAD[stat]
         factor = (league_total + spread * (total - league_total)) / total * style_factor
         base[stat] = tuple(value * factor for value in base[stat])
     draw_boost = DRAW_BOOST + style_draw
@@ -2195,7 +2360,7 @@ def analyse(
             )
     # Hiányzó alapemberek száma csapatonként: a tippajánló ebből ítéli meg a meccs kockázatát.
     key_absences = {team: sum(1 for absence in absences[team] if absence["key"]) for team in (home, away)}
-    return {"markets": markets, "notes": notes, "key_absences": key_absences, "style": reading, "raw": raw}
+    return {"markets": markets, "notes": notes, "key_absences": key_absences, "style": reading, "raw": raw, "before_h2h": before_h2h}
 
 
 def print_wrapped(text: str, indent: str) -> None:
@@ -2342,7 +2507,7 @@ def main() -> int:
     print(f"{league} – tippek a következő forduló {len(fixtures)} meccsére")
     print(f"Forma: utolsó {FORM_MATCHES} meccs, a régebbitől az újabbig. ★ = legalább {CONFIDENT:.0%} esély.")
     print("Gól / szöglet / sárga lap: meccsenkénti átlag, saját / ellenfél.")
-    print(f"A várható értékekben az utolsó {H2H_MATCHES} egymás elleni meccs legfeljebb {H2H_WEIGHT:.0%} súllyal számít.\n")
+    print(f"A szögletek és lapok várható értékében az utolsó {H2H_MATCHES} egymás elleni meccs legfeljebb {H2H_WEIGHT:.0%} súllyal számít.\n")
     rows = []
     for match in fixtures.itertuples():
         context = match_context(match, history, table, args.weather)
