@@ -199,8 +199,8 @@ def load_season(league: str, start_year: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner="Kiírt meccsek letöltése…")
-def load_fixtures(league: str) -> pd.DataFrame:
-    return model.fetch_fixtures(league)
+def load_fixtures(league: str, teams: tuple) -> pd.DataFrame:
+    return model.fetch_upcoming(league, list(teams))
 
 
 @st.cache_data(ttl=60, show_spinner="Élő adatok letöltése…")
@@ -311,36 +311,34 @@ def percent(value):
     return None if value is None or math.isnan(value) else round(value * 100)
 
 
-# --- Oldalsáv: bajnokság, szezon, nap, határok --------------------------------
+# --- Oldalsáv: bajnokság, nap, határok ----------------------------------------
 
-current_start = model.current_season_start()
+season_start = model.current_season_start()  # mindig az idei szezon
 with st.sidebar:
     st.header("Beállítások")
     league = st.selectbox("Bajnokság", list(model.LEAGUES), format_func=model.LEAGUES.get)
-    season_start = st.selectbox(
-        "Szezon",
-        [current_start - offset for offset in range(3)],
-        format_func=lambda year: f"{year}/{(year + 1) % 100:02d}",
-    )
 
 try:
     season = load_season(league, season_start)
     previous = load_season(league, season_start - 1)
-    upcoming = load_fixtures(league) if season_start == current_start else None
+    upcoming = load_fixtures(league, tuple(sorted(set(season["home"]) | set(season["away"]))))
     older = model.older_seasons(league, season_start, load_season)
-except requests.RequestException as error:
+except (requests.RequestException, KeyError, ValueError) as error:
     st.error(f"Nem sikerült letölteni az adatokat: {error}")
     st.stop()
 
-# A meccsek naptári napok szerint választhatók: elöl a kiírt napok (budapesti idő szerint),
-# utánuk a szezon lejátszott napjai a legfrissebbtől visszafelé.
-upcoming_day = None if upcoming is None else upcoming["kickoff"].dt.tz_localize(None).dt.normalize()
+# A menetrendben az elmúlt napok meccsei is benne vannak; ami már a meccsadatok között van, az lejátszottnak számít.
+finished = set(zip(season["home"], season["away"]))
+upcoming = upcoming[[pair not in finished for pair in zip(upcoming["home"], upcoming["away"])]].reset_index(drop=True)
+
+# A meccsek naptári napok szerint választhatók: elöl a kiírt napok időrendben, hónapokra előre
+# (budapesti idő szerint), utánuk a szezon lejátszott napjai a legfrissebbtől visszafelé.
+upcoming_day = upcoming["kickoff"].dt.tz_localize(None).dt.normalize()
 played_day = season["date"].dt.normalize()
 day_counts, upcoming_days = {}, []
-if upcoming_day is not None:
-    for day, count in upcoming_day.value_counts().sort_index().items():
-        day_counts[f"{day:%Y-%m-%d}"] = count
-        upcoming_days.append(f"{day:%Y-%m-%d}")
+for day, count in upcoming_day.value_counts().sort_index().items():
+    day_counts[f"{day:%Y-%m-%d}"] = count
+    upcoming_days.append(f"{day:%Y-%m-%d}")
 for day, count in played_day.value_counts().sort_index(ascending=False).items():
     day_counts.setdefault(f"{day:%Y-%m-%d}", count)
 
@@ -360,7 +358,8 @@ with st.sidebar:
     selected_day = st.selectbox(
         "Nap",
         day_options,
-        index=day_options.index(today) if today in upcoming_days else 0,
+        # Alapból a mai nap, vagy ha ma nincs meccs, a legközelebbi kiírt nap.
+        index=next((index for index, day in enumerate(upcoming_days) if day >= today), 0),
         format_func=day_label,
     )
     bookmaker = st.selectbox("Fogadóiroda", model.BOOKMAKERS)

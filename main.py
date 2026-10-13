@@ -182,6 +182,9 @@ MATCH_MINUTES = 90
 LIVE_MAX_DAYS = 6  # egy forduló legfeljebb ennyi napjára kérdez le élő adatot
 LIVE_NAME_MATCH = 0.6  # ekkora névegyezés kell, hogy egy élő meccset a kiírt meccshez kössünk
 LIVE_KICKOFF_HOURS = 36  # legfeljebb ennyivel térhet el a két forrás kezdési ideje
+SCHEDULE_MONTHS = 3  # a kiírt meccseket ennyi naptári hónapra előre kéri le (a mostanival együtt)
+SCHEDULE_BACK_DAYS = 3  # ennyi napra visszamenőleg is a menetrendben marad a meccs, amíg a meccsadatok közé nem kerül
+SCHEDULE_NAME_MATCH = 0.85  # ekkora névegyezés kell, hogy a menetrend csapatát a meccsadatok csapatához kössük
 # football-data.co.uk név -> az élő forrásban használt név, ahol a kettő nagyon eltér.
 LIVE_ALIASES = {
     "Ath Bilbao": "Athletic Club",
@@ -194,6 +197,7 @@ LIVE_ALIASES = {
     "Wolves": "Wolverhampton Wanderers",
     "Sp Gijon": "Sporting Gijon",
     "Milan": "AC Milan",
+    "Inter": "Internazionale",
 }
 
 # Ligánkénti hírforrások: (név, RSS-cím). Cím nélkül a forrásnak nincs géppel olvasható hírfolyama,
@@ -299,7 +303,11 @@ def download_csv(url: str) -> pd.DataFrame:
 
 def fetch_matches(league: str, season: str) -> pd.DataFrame:
     """Letölti a szezon meccseit, és a lejátszottakat adja vissza."""
-    raw = download_csv(DATA_URL.format(season=season, league=league))
+    return parse_matches(download_csv(DATA_URL.format(season=season, league=league)))
+
+
+def parse_matches(raw: pd.DataFrame) -> pd.DataFrame:
+    """A forrásfájl soraiból a lejátszott meccsek a modell oszlopneveivel; a sorok indexe a forrásé marad."""
     matches = pd.DataFrame(
         {
             "date": pd.to_datetime(raw["Date"], dayfirst=True),
@@ -766,6 +774,82 @@ def fetch_live_espn(league: str, first_day, last_day) -> list:
             }
         )
     return events
+
+
+def fetch_schedule(league: str, teams: list, months: int = SCHEDULE_MONTHS) -> pd.DataFrame:
+    """A bajnokság kiírt meccsei hónapokra előre az ESPN-ről, budapesti idő szerint.
+
+    A fetch_fixtures alakjában adja vissza (kickoff, home, away, referee), a csapatokat a
+    megadott football-data.co.uk nevekre fordítva; amelyik meccs csapatát nem tudja
+    egyértelműen azonosítani, vagy amelyiket elhalasztották, kimarad. Az elmúlt
+    SCHEDULE_BACK_DAYS nap (élő és frissen befejezett) meccsei is benne vannak. Játékvezetőt nem ad.
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    first = now - pd.Timedelta(days=SCHEDULE_BACK_DAYS)
+    events = {}
+    for month in pd.period_range(first.tz_localize(None).to_period("M"), now.tz_localize(None).to_period("M") + months - 1):
+        response = requests.get(
+            ESPN_URL.format(league=ESPN_LEAGUES[league]), params={"dates": month.strftime("%Y%m"), "limit": 300}, timeout=20
+        )
+        response.raise_for_status()
+        for event in response.json().get("events", []):
+            events[event["id"]] = event
+
+    listed, names = [], {}
+    for event in events.values():
+        sides = {side["homeAway"]: side["team"] for side in event["competitions"][0]["competitors"]}
+        kind = event["status"]["type"]
+        kickoff = pd.Timestamp(event["date"])
+        # Elhalasztott, félbeszakadt vagy törölt meccs: lezárt, de nincs végeredménye.
+        called_off = kind.get("name") == "STATUS_POSTPONED" or (kind.get("state") == "post" and not kind.get("completed"))
+        if set(sides) != {"home", "away"} or called_off or kickoff < first:
+            continue
+        for team in sides.values():
+            names[team["id"]] = [team.get(key, "") for key in ("displayName", "shortDisplayName", "name", "location")]
+        listed.append((kickoff.tz_convert("Europe/Budapest"), sides["home"]["id"], sides["away"]["id"]))
+
+    # Egy-egy párosítás a legjobb névegyezéstől lefelé, hogy a hasonló nevű csapatok (Inter – Milan) ne keveredjenek.
+    scores = sorted(
+        ((name_score(team, variants), team, team_id) for team_id, variants in names.items() for team in teams),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    known = {}
+    for score, team, team_id in scores:
+        if score >= SCHEDULE_NAME_MATCH and team_id not in known and team not in known.values():
+            known[team_id] = team
+    rows = [
+        {"kickoff": kickoff, "home": known[home], "away": known[away], "referee": NAN}
+        for kickoff, home, away in listed
+        if home in known and away in known
+    ]
+    schedule = pd.DataFrame(rows, columns=["kickoff", "home", "away", "referee"])
+    # Üres menetrendnél is időbélyeg típusú marad az oszlop.
+    schedule["kickoff"] = pd.to_datetime(schedule["kickoff"], utc=True).dt.tz_convert("Europe/Budapest")
+    return schedule.sort_values("kickoff", kind="stable").reset_index(drop=True)
+
+
+def fetch_upcoming(league: str, teams: list) -> pd.DataFrame:
+    """A kiírt meccsek hónapokra előre (fetch_schedule), a következő forduló játékvezetőivel kiegészítve.
+
+    A játékvezető a football-data.co.uk listájából jön, amely csak a következő napokat
+    tartalmazza; ha a hosszabb menetrend nem érhető el, ez a rövid lista marad.
+    """
+    try:
+        near = fetch_fixtures(league)
+    except (requests.RequestException, KeyError, ValueError):
+        near = None
+    try:
+        schedule = fetch_schedule(league, teams)
+    except (requests.RequestException, KeyError, ValueError):
+        if near is None:
+            raise
+        return near
+    if near is not None and not near.empty and not schedule.empty:
+        referees = near.set_index(["home", "away"])["referee"]
+        referees = referees[~referees.index.duplicated()]
+        schedule["referee"] = [referees.get(pair, NAN) for pair in zip(schedule["home"], schedule["away"])]
+    return schedule
 
 
 # Élő adatforrások: név -> letöltő(league, első nap, utolsó nap) -> események listája.

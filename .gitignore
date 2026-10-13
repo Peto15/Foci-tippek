@@ -4,3 +4,4 @@
 odds_log.json
 .venv/
 __pycache__/
+.cache/
