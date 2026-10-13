@@ -364,13 +364,18 @@ with st.sidebar:
         format_func=day_label,
     )
     bookmaker = st.selectbox("Fogadóiroda", model.BOOKMAKERS)
-    odds_api_key = st.text_input(
-        "The Odds API-kulcs",
-        value=model.odds_api_key(),
-        type="password",
-        help="Kulccsal a Tippmixpro és az Unibet oszlopba az Unibet szorzói automatikusan betöltődnek "
-        "(the-odds-api.com). A kulcs a projektmappa .env fájljából töltődik be (ODDS_API_KEY=...).",
-    ).strip()
+    # A szerveren beállított kulcs nem kerülhet a böngészőbe (a jelszómező értéke kiolvasható),
+    # ezért ilyenkor csak annyit jelzünk, hogy van kulcs; mezőt csak kulcs híján mutatunk.
+    odds_api_key = model.odds_api_key()
+    if odds_api_key:
+        st.caption("The Odds API-kulcs: beállítva a szerveren ✅")
+    else:
+        odds_api_key = st.text_input(
+            "The Odds API-kulcs",
+            type="password",
+            help="Kulccsal a Tippmixpro és az Unibet oszlopba az Unibet szorzói automatikusan betöltődnek "
+            "(the-odds-api.com). Tartósan a projektmappa .env fájljában adható meg (ODDS_API_KEY=...).",
+        ).strip()
     st.divider()
     corner_line =st.number_input("Szöglethatár", 0.5, 20.5, model.CORNER_LINE, step=1.0)
     card_line = st.number_input("Sárgalap-határ", 0.5, 12.5, model.CARD_LINE, step=1.0)
